@@ -1,0 +1,10 @@
+[project]
+name = "invest-tax-calc"
+version = "0.1.0"
+description = "Local Czech tax helper for Trading 212 stock and ETF activity"
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = []
+
+[tool.uv]
+package = false

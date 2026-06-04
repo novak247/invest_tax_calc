@@ -1,0 +1,220 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Invest Tax Calc</title>
+    <link rel="stylesheet" href="/static/styles.css" />
+  </head>
+  <body>
+    <main class="shell">
+      <section class="topbar" aria-label="Application header">
+        <div>
+          <p class="eyebrow">Local Czech tax helper</p>
+          <h1>Invest Tax Calc</h1>
+        </div>
+        <div class="status-pill" id="serverStatus">Local only</div>
+      </section>
+
+      <section class="workspace">
+        <aside class="controls" aria-label="Inputs">
+          <label class="upload-zone" for="csvFile">
+            <span class="upload-icon">CSV</span>
+            <strong>Trading 212 report</strong>
+            <span id="fileName">Choose a CSV file</span>
+            <input id="csvFile" type="file" accept=".csv,text/csv" />
+          </label>
+
+          <section class="control-section" aria-label="Gmail import">
+            <div class="control-heading">
+              <div>
+                <p class="eyebrow">Gmail import</p>
+                <h2>Broker attachments</h2>
+              </div>
+              <span class="scope-pill">Read only</span>
+            </div>
+
+            <label>
+              Gmail query
+              <input id="gmailQuery" type="text" value="from:trading212 has:attachment filename:csv" />
+            </label>
+
+            <label>
+              Client ID
+              <input id="gmailClientId" type="text" autocomplete="off" placeholder="GMAIL_CLIENT_ID" />
+            </label>
+
+            <label>
+              Client secret
+              <input id="gmailClientSecret" type="password" autocomplete="off" placeholder="Optional" />
+            </label>
+
+            <div class="field-row">
+              <label>
+                Max messages
+                <input id="gmailMaxMessages" type="number" min="1" max="500" value="200" />
+              </label>
+              <label>
+                Output
+                <input id="gmailOutput" type="text" value="imports/email_reports" />
+              </label>
+            </div>
+
+            <button id="gmailBtn" type="button">Connect Gmail</button>
+            <div id="gmailStatus" class="gmail-status hidden"></div>
+            <div id="gmailFiles" class="gmail-files hidden"></div>
+          </section>
+
+          <div class="field-row">
+            <label>
+              Tax year
+              <input id="taxYear" type="number" min="2000" max="2100" />
+            </label>
+            <label>
+              As of
+              <input id="asOf" type="date" />
+            </label>
+          </div>
+
+          <label>
+            Default CSV currency
+            <select id="defaultCurrency">
+              <option>CZK</option>
+              <option>EUR</option>
+              <option>USD</option>
+              <option>GBP</option>
+            </select>
+          </label>
+
+          <label>
+            CZK FX rates
+            <textarea id="rates" spellcheck="false">USD=23.20
+EUR=25.10
+GBP=29.40</textarea>
+          </label>
+
+          <button id="analyzeBtn" type="button">
+            <span aria-hidden="true">↻</span>
+            Analyze report
+          </button>
+
+          <p class="fineprint">
+            No data leaves this machine. The app only talks to the local Python server.
+          </p>
+        </aside>
+
+        <section class="results" aria-live="polite">
+          <div id="emptyState" class="empty-state">
+            <div class="empty-mark">212</div>
+            <h2>Drop in your Trading 212 CSV to start.</h2>
+            <p>
+              The first pass will show annual sale proceeds, taxable gains, open lots,
+              and dates when holdings become time-test exempt.
+            </p>
+          </div>
+
+          <div id="errorBox" class="error-box hidden"></div>
+
+          <div id="dashboard" class="hidden">
+            <section class="summary-strip" id="summaryStrip"></section>
+
+            <section class="panel planner">
+              <div class="panel-heading">
+                <div>
+                  <p class="eyebrow">Sell planner</p>
+                  <h2>Estimate one future sale</h2>
+                </div>
+                <button id="planBtn" type="button">
+                  <span aria-hidden="true">→</span>
+                  Run plan
+                </button>
+              </div>
+
+              <div class="planner-grid">
+                <label>
+                  Instrument
+                  <select id="planInstrument"></select>
+                </label>
+                <label>
+                  Quantity
+                  <input id="planQuantity" type="number" min="0" step="0.000001" />
+                </label>
+                <label>
+                  CZK price/share
+                  <input id="planPrice" type="number" min="0" step="0.01" />
+                </label>
+                <label>
+                  Sale date
+                  <input id="planDate" type="date" />
+                </label>
+              </div>
+
+              <div id="planResult" class="plan-result hidden"></div>
+            </section>
+
+            <section class="panel">
+              <div class="panel-heading">
+                <div>
+                  <p class="eyebrow">Open positions</p>
+                  <h2>Holdings and time-test dates</h2>
+                </div>
+              </div>
+              <div class="table-wrap">
+                <table>
+                  <thead>
+                    <tr>
+                      <th>Instrument</th>
+                      <th>Qty</th>
+                      <th>Avg cost CZK</th>
+                      <th>Tax-free now</th>
+                      <th>Next tax-free date</th>
+                    </tr>
+                  </thead>
+                  <tbody id="holdingsBody"></tbody>
+                </table>
+              </div>
+            </section>
+
+            <section class="panel">
+              <div class="panel-heading">
+                <div>
+                  <p class="eyebrow">Matched sells</p>
+                  <h2>Tax lots for selected year</h2>
+                </div>
+              </div>
+              <div class="table-wrap">
+                <table>
+                  <thead>
+                    <tr>
+                      <th>Instrument</th>
+                      <th>Sale</th>
+                      <th>Buy</th>
+                      <th>Qty</th>
+                      <th>Proceeds</th>
+                      <th>Cost</th>
+                      <th>Gain</th>
+                      <th>Status</th>
+                    </tr>
+                  </thead>
+                  <tbody id="matchesBody"></tbody>
+                </table>
+              </div>
+            </section>
+
+            <section id="warningsPanel" class="panel warning-panel hidden">
+              <div class="panel-heading">
+                <div>
+                  <p class="eyebrow">Review</p>
+                  <h2>Warnings</h2>
+                </div>
+              </div>
+              <ul id="warningsList"></ul>
+            </section>
+          </div>
+        </section>
+      </section>
+    </main>
+
+    <script src="/static/app.js"></script>
+  </body>
+</html>
