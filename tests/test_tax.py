@@ -87,6 +87,35 @@ class TaxEngineTest(unittest.TestCase):
         self.assertEqual(result["deltaTaxableGainCzk"], 40000.0)
         self.assertEqual(result["deltaEstimatedTax15Czk"], 6000.0)
 
+    def test_planned_sale_groups_lots_by_tax_status_and_date_range(self) -> None:
+        txs = [
+            trade("buy", "2021-01-01T10:00:00", "5", "25000", "old"),
+            trade("buy", "2024-01-01T10:00:00", "10", "50000", "new-1"),
+            trade("buy", "2024-02-01T10:00:00", "10", "60000", "new-2"),
+        ]
+        result = plan_sale(
+            txs,
+            rates={},
+            instrument_key="ISIN:IE00TEST",
+            quantity="20",
+            price_per_share_czk="10000",
+            sale_date="2025-07-01",
+        )
+
+        groups = result["plannedMatchGroups"]
+
+        self.assertEqual(len(groups), 2)
+        self.assertFalse(groups[0]["taxable"])
+        self.assertEqual(groups[0]["buyDateStart"], "2021-01-01")
+        self.assertEqual(groups[0]["buyDateEnd"], "2021-01-01")
+        self.assertEqual(groups[0]["lotCount"], 1)
+        self.assertEqual(groups[0]["quantity"], 5.0)
+        self.assertTrue(groups[1]["taxable"])
+        self.assertEqual(groups[1]["buyDateStart"], "2024-01-01")
+        self.assertEqual(groups[1]["buyDateEnd"], "2024-02-01")
+        self.assertEqual(groups[1]["lotCount"], 2)
+        self.assertEqual(groups[1]["quantity"], 15.0)
+
 
 if __name__ == "__main__":
     unittest.main()

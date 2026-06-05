@@ -134,6 +134,7 @@ def plan_sale(
         for match in after["matches"]
         if match["saleSourceId"] == PLANNED_SALE_ID
     ]
+    planned_match_groups = _planned_match_groups(planned_matches)
 
     return {
         "saleDate": planned_date.isoformat(),
@@ -150,8 +151,74 @@ def plan_sale(
             - Decimal(str(baseline["summary"]["estimatedTax15Czk"]))
         ),
         "plannedMatches": planned_matches,
+        "plannedMatchGroups": planned_match_groups,
         "warnings": after.get("warnings", []),
     }
+
+
+def _planned_match_groups(matches: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    ordered = sorted(
+        matches,
+        key=lambda match: (
+            match.get("buyDate") or "9999-12-31",
+            match.get("status") or "",
+            match.get("buySourceId") or "",
+        ),
+    )
+    groups: list[dict[str, Any]] = []
+    current: dict[str, Any] | None = None
+
+    for match in ordered:
+        key = (bool(match.get("taxable")), str(match.get("status") or ""))
+        if current is None or current["_key"] != key:
+            current = {
+                "_key": key,
+                "taxable": key[0],
+                "status": key[1],
+                "saleDate": match.get("saleDate"),
+                "buyDateStart": match.get("buyDate"),
+                "buyDateEnd": match.get("buyDate"),
+                "lotCount": 0,
+                "quantity": Decimal("0"),
+                "grossProceedsCzk": Decimal("0"),
+                "costCzk": Decimal("0"),
+                "gainCzk": Decimal("0"),
+                "saleFeesCzk": Decimal("0"),
+            }
+            groups.append(current)
+
+        buy_date = match.get("buyDate")
+        if buy_date:
+            if not current["buyDateStart"] or buy_date < current["buyDateStart"]:
+                current["buyDateStart"] = buy_date
+            if not current["buyDateEnd"] or buy_date > current["buyDateEnd"]:
+                current["buyDateEnd"] = buy_date
+
+        current["lotCount"] += 1
+        current["quantity"] += Decimal(str(match.get("quantity") or "0"))
+        current["grossProceedsCzk"] += Decimal(str(match.get("grossProceedsCzk") or "0"))
+        current["costCzk"] += Decimal(str(match.get("costCzk") or "0"))
+        current["gainCzk"] += Decimal(str(match.get("gainCzk") or "0"))
+        current["saleFeesCzk"] += Decimal(str(match.get("saleFeesCzk") or "0"))
+
+    payload: list[dict[str, Any]] = []
+    for group in groups:
+        payload.append(
+            {
+                "taxable": bool(group["taxable"]),
+                "status": str(group["status"]),
+                "saleDate": group["saleDate"],
+                "buyDateStart": group["buyDateStart"],
+                "buyDateEnd": group["buyDateEnd"],
+                "lotCount": int(group["lotCount"]),
+                "quantity": _qty(group["quantity"]),
+                "grossProceedsCzk": _num(group["grossProceedsCzk"]),
+                "costCzk": _num(group["costCzk"]),
+                "gainCzk": _num(group["gainCzk"]),
+                "saleFeesCzk": _num(group["saleFeesCzk"]),
+            }
+        )
+    return payload
 
 
 def _match_lots(

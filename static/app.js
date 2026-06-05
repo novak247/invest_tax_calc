@@ -437,6 +437,49 @@ function setupPlanner(holdings) {
 
 function renderPlan(result) {
   const box = $("planResult");
+  const groups = result.plannedMatchGroups || [];
+  const plannedGroups = groups.length
+    ? `
+      <div class="plan-group-table">
+        <div class="plan-group-head">
+          <span>Lot range</span>
+          <span>Qty</span>
+          <span>Proceeds</span>
+          <span>Cost</span>
+          <span>Gain</span>
+          <span>Status</span>
+        </div>
+        ${groups
+          .map(
+            (group) => `
+              <div class="plan-group-row">
+                <span>${escapeHtml(planDateRange(group))}</span>
+                <span class="num">${qty(group.quantity)}</span>
+                <span class="num">${czk(group.grossProceedsCzk)}</span>
+                <span class="num">${czk(group.costCzk)}</span>
+                <span class="num">${czk(group.gainCzk)}</span>
+                <span><span class="badge ${group.taxable ? "tax" : "ok"}">${escapeHtml(group.status)}</span></span>
+              </div>
+            `
+          )
+          .join("")}
+      </div>
+    `
+    : "";
+
+  box.innerHTML = `
+    <div class="plan-result-grid">
+      <div><span>Planned proceeds</span><strong>${czk(result.plannedProceedsCzk)}</strong></div>
+      <div><span>Taxable gain delta</span><strong>${czk(result.deltaTaxableGainCzk)}</strong></div>
+      <div><span>Tax delta at 15%</span><strong>${czk(result.deltaEstimatedTax15Czk)}</strong></div>
+      <div><span>After-sale gross proceeds</span><strong>${czk(result.afterSummary.grossProceedsCzk)}</strong></div>
+    </div>
+    ${plannedGroups}
+  `;
+  box.classList.remove("hidden");
+  return;
+
+  /*
   const plannedRows = result.plannedMatches
     .map(
       (match) =>
@@ -454,6 +497,15 @@ function renderPlan(result) {
     ${plannedRows ? `<div class="plan-result-grid" style="margin-top: 12px">${plannedRows}</div>` : ""}
   `;
   box.classList.remove("hidden");
+  */
+}
+
+function planDateRange(group) {
+  const start = group.buyDateStart || "Missing buy";
+  const end = group.buyDateEnd || group.buyDateStart || "Missing buy";
+  const count = Number(group.lotCount || 0);
+  const range = start === end ? start : `${start} to ${end}`;
+  return count > 1 ? `${range} (${count} lots)` : range;
 }
 
 function renderGmailConfig(result) {
