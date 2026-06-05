@@ -70,10 +70,10 @@ class AttachmentStore:
         self.output_dir = output_dir
         self.ledger = ledger
 
-    def save_attachment(self, attachment: Attachment) -> SaveResult:
+    def save_attachment(self, attachment: Attachment, *, save_ledger: bool = True) -> SaveResult:
         digest = hashlib.sha256(attachment.data).hexdigest()
         existing_path = self.ledger.get_path(digest)
-        if existing_path:
+        if existing_path and existing_path.is_file():
             return SaveResult(
                 saved=False,
                 sha256=digest,
@@ -89,7 +89,8 @@ class AttachmentStore:
         destination.write_bytes(attachment.data)
 
         self.ledger.add(digest, attachment, destination)
-        self.ledger.save()
+        if save_ledger:
+            self.ledger.save()
         return SaveResult(
             saved=True,
             sha256=digest,

@@ -91,6 +91,6 @@ The Gmail connector requests exactly:
 https://www.googleapis.com/auth/gmail.readonly
 ```
 
-Attachments are downloaded into `imports/email_reports/`. Imported attachment hashes are recorded in `.invest_tax_calc/email_import_ledger.json`, so re-running an import skips duplicates by SHA-256 hash.
+Attachments are downloaded into `imports/email_reports/`. Imported attachment hashes are recorded in `.invest_tax_calc/email_import_ledger.json`, so re-running an import reuses already-downloaded PDFs by SHA-256 hash while still analyzing them. Parsed PDF trades are cached under `.invest_tax_calc/parsed_pdf_cache/`; use the `Re-parse cached PDFs` option after changing the parser.
 
 When downloaded attachments are PDFs, the web app loads all matching PDF statements into the analyzer automatically.

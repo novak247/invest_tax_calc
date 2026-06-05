@@ -23,6 +23,11 @@ def parse_trading212_pdf(data: bytes, *, filename: str = "trading212.pdf") -> li
     return parse_trading212_pdf_text(text, filename=filename)
 
 
+def parse_trading212_pdf_job(job: tuple[bytes, str]) -> list[Trade]:
+    data, filename = job
+    return parse_trading212_pdf(data, filename=filename)
+
+
 def parse_trading212_pdf_text(
     text: str,
     *,

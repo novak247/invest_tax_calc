@@ -18,7 +18,7 @@ class AppGmailTests(unittest.TestCase):
         with self.assertRaises(AppError):
             _resolve_project_path("..")
 
-    def test_pdf_payload_includes_browser_handoff_content(self) -> None:
+    def test_pdf_payload_uses_saved_file_path(self) -> None:
         payload = _pdf_payload(
             Attachment(
                 provider="gmail",
@@ -34,7 +34,8 @@ class AppGmailTests(unittest.TestCase):
         assert payload is not None
         self.assertEqual(payload["filename"], "Trading 212 statement.pdf")
         self.assertTrue(payload["parseable"])
-        self.assertEqual(payload["contentBase64"], "JVBERi0xLjc=")
+        self.assertEqual(payload["contentBase64"], "")
+        self.assertTrue(payload["path"].replace("\\", "/").endswith("imports/email_reports/gmail/report.pdf"))
 
     def test_gmail_session_payload_includes_progress(self) -> None:
         session = GmailImportSession(
@@ -45,6 +46,7 @@ class AppGmailTests(unittest.TestCase):
             redirect_uri="http://127.0.0.1/callback",
             query="from:trading212",
             max_messages=500,
+            reparse_cached_pdfs=False,
             output=_resolve_project_path("imports/email_reports"),
             ledger=_resolve_project_path(".invest_tax_calc/email_import_ledger.json"),
             progress_phase="downloading",
@@ -63,6 +65,7 @@ class AppGmailTests(unittest.TestCase):
         self.assertEqual(payload["progress"]["processedMessages"], 123)
         self.assertEqual(payload["progress"]["saved"], 100)
         self.assertEqual(payload["progress"]["skipped"], 20)
+        self.assertFalse(payload["reparseCachedPdfs"])
 
     def test_google_installed_credentials_json_is_accepted(self) -> None:
         config = _parse_gmail_oauth_credentials(

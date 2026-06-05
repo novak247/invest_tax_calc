@@ -41,7 +41,9 @@ $("pdfFile").addEventListener("change", async (event) => {
 
 $("analyzeBtn").addEventListener("click", analyze);
 $("planBtn").addEventListener("click", runPlan);
-$("gmailBtn").addEventListener("click", startGmailImport);
+$("gmailConnectBtn").addEventListener("click", connectGmail);
+$("gmailFetchBtn").addEventListener("click", startGmailImport);
+$("gmailCancelBtn").addEventListener("click", cancelGmailImport);
 $("gmailSetupBtn").addEventListener("click", saveGmailConfig);
 loadGmailConfig();
 watchDevReload();
@@ -49,7 +51,7 @@ watchDevReload();
 async function analyze() {
   if (!state.content && !state.reports.length) {
     showError("Choose a Trading 212 PDF statement first.");
-    return;
+    return false;
   }
 
   setBusy("analyzeBtn", true);
@@ -58,8 +60,10 @@ async function analyze() {
     const result = await postJson("/api/analyze", payloadBase());
     state.result = result;
     renderResult(result);
+    return true;
   } catch (error) {
     showError(error.message);
+    return false;
   } finally {
     setBusy("analyzeBtn", false);
   }
@@ -89,7 +93,7 @@ async function runPlan() {
   }
 }
 
-async function startGmailImport() {
+async function connectGmail() {
   if (!state.gmailConfigured) {
     renderGmailStatus({ status: "error", message: "Save Gmail setup first." });
     return;
@@ -99,16 +103,10 @@ async function startGmailImport() {
   clearTimeout(state.gmailPoll);
   setGmailBusy(true);
   renderGmailStatus({ status: "starting", message: "Preparing Google sign-in." });
-  $("gmailFiles").classList.add("hidden");
-  $("gmailFiles").innerHTML = "";
-  const popup = state.gmailTokenCached ? null : window.open("", "_blank");
+  const popup = window.open("", "_blank");
 
   try {
-    const result = await postJson("/api/email/gmail/start", {
-      query: $("gmailQuery").value,
-      maxMessages: Number($("gmailMaxMessages").value || 500),
-      output: $("gmailOutput").value,
-    });
+    const result = await postJson("/api/email/gmail/connect", {});
     state.gmailState = result.state;
     state.gmailAuthUrl = result.authUrl;
     renderGmailStatus(result);
@@ -122,8 +120,6 @@ async function startGmailImport() {
         message: "Popup blocked. Open the Google sign-in link below.",
         authUrl: result.authUrl,
       });
-    } else if (popup && !popup.closed) {
-      popup.close();
     }
     pollGmailStatus();
   } catch (error) {
@@ -131,6 +127,52 @@ async function startGmailImport() {
     setGmailBusy(false);
     renderGmailStatus({ status: "error", message: error.message, error: error.message });
     showError(error.message);
+  }
+}
+
+async function startGmailImport() {
+  if (!state.gmailConfigured) {
+    renderGmailStatus({ status: "error", message: "Save Gmail setup first." });
+    return;
+  }
+  if (!state.gmailTokenCached) {
+    renderGmailStatus({ status: "error", message: "Connect Gmail first, then fetch reports." });
+    return;
+  }
+
+  clearError();
+  clearTimeout(state.gmailPoll);
+  setGmailBusy(true);
+  renderGmailStatus({ status: "starting", message: "Starting report fetch." });
+  $("gmailFiles").classList.add("hidden");
+  $("gmailFiles").innerHTML = "";
+
+  try {
+    const result = await postJson("/api/email/gmail/start", {
+      query: $("gmailQuery").value,
+      maxMessages: Number($("gmailMaxMessages").value || 500),
+      output: $("gmailOutput").value,
+      reparseCachedPdfs: $("gmailReparseCachedPdfs").checked,
+    });
+    state.gmailState = result.state;
+    state.gmailAuthUrl = "";
+    renderGmailStatus(result);
+    pollGmailStatus();
+  } catch (error) {
+    setGmailBusy(false);
+    renderGmailStatus({ status: "error", message: error.message, error: error.message });
+    showError(error.message);
+  }
+}
+
+async function cancelGmailImport() {
+  if (!state.gmailState) return;
+  $("gmailCancelBtn").disabled = true;
+  try {
+    const result = await postJson("/api/email/gmail/cancel", { state: state.gmailState });
+    renderGmailStatus(result);
+  } catch (error) {
+    renderGmailStatus({ status: "error", message: error.message, error: error.message });
   }
 }
 
@@ -171,8 +213,16 @@ async function pollGmailStatus() {
     if (result.status === "done") {
       state.gmailTokenCached = true;
       setGmailBusy(false);
-      renderGmailFiles(result.files || []);
-      await loadGmailPdfs(result);
+      await loadGmailConfig();
+      if (result.purpose === "import") {
+        renderGmailFiles(result.files || []);
+        await loadGmailPdfs(result);
+      }
+      return;
+    }
+
+    if (result.status === "canceled") {
+      setGmailBusy(false);
       return;
     }
 
@@ -189,8 +239,18 @@ async function pollGmailStatus() {
 }
 
 async function loadGmailPdfs(result) {
-  const pdfs = (result.pdfFiles || []).filter((file) => file.contentBase64 && !file.tooLarge);
+  const pdfs = (result.pdfFiles || []).filter((file) => !file.tooLarge && (file.path || file.contentBase64));
   if (!pdfs.length) {
+    state.filename = "";
+    state.content = "";
+    state.contentType = "";
+    state.contentEncoding = "text";
+    state.reports = [];
+    if (Number(result.skipped || 0) > 0 && Number(result.saved || 0) === 0) {
+      clearError();
+      $("fileName").textContent = "Gmail: no new PDF statements";
+      return;
+    }
     if ((result.pdfFiles || []).some((file) => file.tooLarge)) {
       showError("Gmail downloaded a PDF, but it is too large to load automatically.");
       return;
@@ -201,18 +261,31 @@ async function loadGmailPdfs(result) {
 
   const first = pdfs[0];
   state.filename = pdfs.length === 1 ? first.filename : `${pdfs.length} Gmail PDF statements`;
-  state.content = first.contentBase64;
+  state.content = first.contentBase64 || "";
   state.contentType = first.contentType || "application/pdf";
-  state.contentEncoding = "base64";
+  state.contentEncoding = first.contentBase64 ? "base64" : "path";
   state.reports = pdfs.map((pdf) => ({
     filename: pdf.filename,
-    content: pdf.contentBase64,
+    content: pdf.contentBase64 || "",
+    path: pdf.path || "",
     contentType: pdf.contentType || "application/pdf",
-    contentEncoding: "base64",
+    contentEncoding: pdf.contentBase64 ? "base64" : "path",
   }));
   $("fileName").textContent = `Gmail: ${state.filename}`;
   clearError();
-  await analyze();
+  renderGmailStatus({
+    ...result,
+    status: "analyzing",
+    message: `Analyzing ${pdfs.length} PDF statement${pdfs.length === 1 ? "" : "s"}.`,
+  });
+  const analyzed = await analyze();
+  renderGmailStatus({
+    ...result,
+    status: analyzed ? "done" : "error",
+    message: analyzed
+      ? `Analysis complete. Loaded ${pdfs.length} PDF statement${pdfs.length === 1 ? "" : "s"}.`
+      : "Analysis failed. Check the error below.",
+  });
 }
 
 function payloadBase() {
@@ -222,6 +295,7 @@ function payloadBase() {
     contentType: state.contentType,
     contentEncoding: state.contentEncoding,
     reports: state.reports,
+    reparseCachedPdfs: $("gmailReparseCachedPdfs").checked,
     taxYear: Number($("taxYear").value),
     asOf: $("asOf").value,
     rates: $("rates").value,
@@ -433,7 +507,7 @@ function gmailProgressHtml(progress) {
     <div class="progress-block">
       <div class="progress-meta">
         <span>${escapeHtml(label)}</span>
-        <span>${escapeHtml(`${totalAttachments} attachments, ${saved} saved, ${skipped} duplicate`)}</span>
+        <span>${escapeHtml(`${totalAttachments} attachments, ${saved} new, ${skipped} cached`)}</span>
       </div>
       <div class="progress-track" aria-label="Gmail import progress">
         <div class="progress-fill" style="width: ${percent}%"></div>
@@ -456,7 +530,7 @@ function renderGmailFiles(files) {
       (file) => `
         <div>
           <strong>${escapeHtml(file.filename)}</strong>
-          <span>${escapeHtml(`${fileKind(file)} ${file.saved ? "saved" : "duplicate"}`)}</span>
+          <span>${escapeHtml(`${fileKind(file)} ${file.saved ? "saved" : "cached"}`)}</span>
         </div>
       `
     )
@@ -476,9 +550,12 @@ function statusLabel(status) {
     starting: "Starting",
     waiting: "Waiting",
     authorizing: "Authorizing",
+    canceling: "Stopping",
+    canceled: "Stopped",
     listing: "Finding messages",
     downloading: "Downloading",
     importing: "Importing",
+    analyzing: "Analyzing",
     done: "Done",
     error: "Error",
   };
@@ -491,7 +568,10 @@ function setBusy(id, busy) {
 }
 
 function setGmailBusy(busy) {
-  $("gmailBtn").disabled = busy || !state.gmailConfigured;
+  $("gmailConnectBtn").disabled = busy || !state.gmailConfigured;
+  $("gmailFetchBtn").disabled = busy || !state.gmailConfigured || !state.gmailTokenCached;
+  $("gmailCancelBtn").classList.toggle("hidden", !busy);
+  $("gmailCancelBtn").disabled = !busy;
 }
 
 function showError(message) {

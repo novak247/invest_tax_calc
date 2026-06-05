@@ -139,6 +139,12 @@ button:disabled {
   filter: saturate(0.7);
 }
 
+.danger-button {
+  border-color: var(--danger);
+  background: linear-gradient(180deg, #b84a35, var(--danger));
+  color: #fff7f4;
+}
+
 button span[aria-hidden="true"] {
   font-size: 15px;
   line-height: 1;
@@ -462,6 +468,32 @@ input[type="number"] {
 .gmail-setup {
   display: grid;
   gap: 12px;
+}
+
+.gmail-actions {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 8px;
+}
+
+.gmail-actions button {
+  width: 100%;
+  padding: 0 10px;
+}
+
+.check-row {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  color: var(--ink-soft);
+  font-size: 12.5px;
+  font-weight: 650;
+}
+
+.check-row input {
+  width: 16px;
+  height: 16px;
+  accent-color: var(--forest);
 }
 
 .gmail-status strong,

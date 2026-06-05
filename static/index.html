@@ -3,110 +3,211 @@
   <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
-    <title>Invest Tax Calc</title>
+    <title>ITC//TERMINAL</title>
     <link rel="preconnect" href="https://fonts.googleapis.com" />
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
-    <link
-      href="https://fonts.googleapis.com/css2?family=Fraunces:opsz,wght@9..144,400;9..144,500;9..144,600;9..144,700&family=Spline+Sans:wght@400;500;600;700&family=Spline+Sans+Mono:wght@400;500;600&display=swap"
-      rel="stylesheet"
-    />
-    <link rel="stylesheet" href="/static/styles.css" />
+    <link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;700;800&display=swap" rel="stylesheet" />
+    <style>
+      /* ============ TERMINAL ============ */
+      :root {
+        --bg: #07090a;
+        --bg2: #0d1113;
+        --grid: #1a2024;
+        --fg: #c8d6d0;
+        --dim: #5d6b66;
+        --amber: #ffb43d;
+        --green: #36f5a0;
+        --red: #ff5d5d;
+        --cyan: #4fd6ff;
+        --mono: "JetBrains Mono", monospace;
+      }
+      * { box-sizing: border-box; }
+      body { margin: 0; background: var(--bg); color: var(--fg); font-family: var(--mono); font-size: 13px; line-height: 1.4; }
+      body::before { content: ""; position: fixed; inset: 0; pointer-events: none; background: repeating-linear-gradient(0deg, transparent 0 2px, rgba(255,255,255,0.012) 2px 3px); z-index: 99; }
+      .hidden { display: none !important; }
+      h1, h2, p { margin: 0; }
+      a { color: var(--cyan); }
+
+      .topbar { display: flex; justify-content: space-between; align-items: center; background: var(--bg2); border-bottom: 1px solid var(--grid); padding: 8px 16px; }
+      .topbar .logo { font-weight: 800; letter-spacing: 0.1em; color: var(--amber); }
+      .topbar .logo b { color: var(--fg); }
+      .topbar .ticker { display: flex; gap: 22px; font-size: 11px; color: var(--dim); }
+      .topbar .ticker b { color: var(--green); }
+      #serverStatus { color: var(--green); }
+
+      .grid { display: grid; grid-template-columns: 330px 1fr; min-height: calc(100vh - 38px); }
+      .console { border-right: 1px solid var(--grid); background: var(--bg2); padding: 0; }
+      .blk { border-bottom: 1px solid var(--grid); padding: 14px 16px; }
+      .blk-title { color: var(--amber); font-size: 10px; letter-spacing: 0.18em; text-transform: uppercase; margin-bottom: 12px; }
+      .blk-title::before { content: "▌ "; }
+
+      label { display: block; font-size: 10px; text-transform: uppercase; letter-spacing: 0.1em; color: var(--dim); margin-bottom: 12px; }
+      input, select, textarea { width: 100%; margin-top: 4px; background: var(--bg); border: 1px solid var(--grid); color: var(--green); font-family: var(--mono); font-size: 13px; padding: 8px 9px; outline: none; }
+      input:focus, select:focus, textarea:focus { border-color: var(--amber); box-shadow: 0 0 0 1px var(--amber); }
+      textarea { resize: vertical; min-height: 64px; color: var(--cyan); }
+      .row2 { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
+
+      button { width: 100%; background: var(--amber); color: #0a0a0a; border: none; font-family: var(--mono); font-weight: 700; font-size: 12px; letter-spacing: 0.1em; text-transform: uppercase; padding: 11px; cursor: pointer; }
+      button:hover:not(:disabled) { background: var(--green); }
+      button:disabled { background: var(--grid); color: var(--dim); cursor: not-allowed; }
+      .danger-button { background: transparent; color: var(--red); border: 1px solid var(--red); }
+      .danger-button:hover:not(:disabled) { background: var(--red); color: #0a0a0a; }
+
+      .upload { display: block; border: 1px dashed var(--grid); padding: 14px; cursor: pointer; background: var(--bg); }
+      .upload input { display: none; }
+      .upload b { color: var(--amber); display: block; font-size: 14px; }
+      .upload span { color: var(--dim); font-size: 11px; }
+      .gmail-open { display: block; margin-top: 10px; color: var(--cyan); font-size: 11px; cursor: pointer; text-decoration: underline; }
+
+      .fineprint { color: var(--dim); font-size: 10px; line-height: 1.6; }
+
+      .stage { padding: 0; overflow: auto; display: flex; flex-direction: column; }
+      .stage-body { flex: 1; }
+      .empty-state { padding: 60px 40px; }
+      .empty-mark { font-size: 11px; color: var(--green); margin-bottom: 20px; letter-spacing: 0.3em; }
+      .empty-mark::before { content: "$ "; color: var(--dim); }
+      .empty-state h2 { font-size: clamp(22px, 3vw, 34px); font-weight: 700; color: var(--fg); max-width: 24ch; line-height: 1.2; }
+      .empty-state h2::after { content: "_"; color: var(--amber); animation: blink 1s steps(1) infinite; }
+      @keyframes blink { 50% { opacity: 0; } }
+      .empty-state p { color: var(--dim); margin-top: 16px; max-width: 60ch; }
+      .empty-steps { display: flex; gap: 24px; margin-top: 24px; font-size: 11px; color: var(--dim); }
+      .empty-steps i { color: var(--amber); font-style: normal; }
+
+      .error-box { border: 1px solid var(--red); background: rgba(255,93,93,0.08); color: var(--red); padding: 10px 14px; margin: 16px; }
+      .error-box::before { content: "ERR: "; font-weight: 700; }
+
+      .summary-strip { display: grid; grid-template-columns: repeat(5, 1fr); gap: 1px; background: var(--grid); border: 1px solid var(--grid); margin: 16px; }
+      .metric { background: var(--bg2); padding: 12px 13px; }
+      .metric span { color: var(--dim); font-size: 9.5px; text-transform: uppercase; letter-spacing: 0.08em; }
+      .metric strong { display: block; font-size: 22px; font-weight: 800; color: var(--green); margin: 6px 0 3px; font-variant-numeric: tabular-nums; }
+      .metric small { color: var(--dim); font-size: 10px; }
+
+      .panel { margin: 16px; border: 1px solid var(--grid); }
+      .panel-heading { display: flex; justify-content: space-between; align-items: center; background: var(--bg2); border-bottom: 1px solid var(--grid); padding: 10px 14px; }
+      .panel-heading .eyebrow { color: var(--amber); font-size: 9.5px; text-transform: uppercase; letter-spacing: 0.15em; }
+      .panel-heading h2 { font-size: 14px; font-weight: 700; color: var(--fg); }
+      .panel-heading button { width: auto; padding: 7px 14px; }
+
+      .planner-grid { display: grid; grid-template-columns: repeat(4, 1fr); gap: 12px; padding: 14px; }
+      .plan-result { border-top: 1px solid var(--grid); padding: 14px; }
+      .plan-result-grid { display: grid; grid-template-columns: repeat(4, 1fr); gap: 12px; }
+      .plan-result-grid span { color: var(--dim); font-size: 9.5px; text-transform: uppercase; display: block; }
+      .plan-result-grid strong { color: var(--green); font-size: 17px; font-weight: 700; }
+
+      table { width: 100%; border-collapse: collapse; }
+      thead th { background: var(--bg); color: var(--amber); font-size: 9.5px; text-transform: uppercase; letter-spacing: 0.08em; text-align: left; padding: 8px 12px; border-bottom: 1px solid var(--grid); }
+      td { padding: 7px 12px; border-bottom: 1px solid var(--grid); font-size: 12px; color: var(--fg); }
+      td.num { text-align: right; color: var(--green); font-variant-numeric: tabular-nums; }
+      tbody tr:nth-child(even) { background: rgba(255,255,255,0.015); }
+      tbody tr:hover { background: rgba(255,180,61,0.06); }
+
+      .badge { font-size: 10px; text-transform: uppercase; padding: 2px 7px; border: 1px solid; }
+      .badge.ok { color: var(--green); border-color: var(--green); }
+      .badge.tax { color: var(--amber); border-color: var(--amber); }
+
+      .warning-panel { border-color: var(--amber); }
+      .warning-panel ul { color: var(--amber); font-size: 12px; padding: 14px 14px 14px 32px; margin: 0; }
+
+      /* Gmail blocks */
+      .gmail-setup { display: grid; gap: 10px; margin-top: 10px; }
+      .check-row { display: flex; align-items: center; gap: 8px; text-transform: none; letter-spacing: 0; color: var(--fg); font-size: 12px; margin-bottom: 12px; }
+      .check-row input { width: auto; margin: 0; }
+      .gmail-actions { display: grid; gap: 8px; }
+      .gmail-status, .gmail-files { border: 1px solid var(--grid); border-left: 2px solid var(--cyan); background: var(--bg); padding: 10px 12px; margin-top: 10px; font-size: 11px; color: var(--dim); display: grid; gap: 4px; }
+      .gmail-status strong, .gmail-files strong { color: var(--green); }
+      .gmail-files div { display: flex; justify-content: space-between; }
+      .gmail-files span { color: var(--cyan); font-size: 9.5px; text-transform: uppercase; }
+      .progress-block { margin-top: 8px; }
+      .progress-meta { display: flex; justify-content: space-between; font-size: 10px; color: var(--dim); margin-bottom: 4px; }
+      .progress-track { height: 4px; background: var(--grid); }
+      .progress-fill { height: 100%; background: var(--green); transition: width 0.3s; }
+
+      .scope-pill { color: var(--green); font-size: 9px; border: 1px solid var(--green); padding: 1px 6px; text-transform: uppercase; }
+
+      .statusbar { position: sticky; bottom: 0; display: flex; gap: 20px; background: var(--bg2); border-top: 1px solid var(--grid); padding: 6px 16px; font-size: 10px; color: var(--dim); }
+      .statusbar b { color: var(--amber); }
+      /* Live status: idle = green READY, busy = amber ANALYZING with cycling dots */
+      .term-status { color: var(--green); }
+      .term-status.busy { color: var(--amber); }
+      .term-status.busy::after {
+        content: "";
+        display: inline-block;
+        width: 1.6ch;
+        text-align: left;
+        animation: termdots 1.1s steps(1, end) infinite;
+      }
+      @keyframes termdots {
+        0%   { content: "."; }
+        33%  { content: ".."; }
+        66%  { content: "..."; }
+      }
+      @media (prefers-reduced-motion: reduce) {
+        .term-status.busy::after { content: "..."; animation: none; }
+        .empty-state h2::after { animation: none; }
+      }
+
+      /* Drawer */
+      .drawer-toggle { display: none; }
+      .drawer { position: fixed; inset: 0; pointer-events: none; opacity: 0; transition: opacity 0.2s; z-index: 100; }
+      .drawer-scrim { position: absolute; inset: 0; background: rgba(0,0,0,0.6); }
+      .drawer-panel { position: absolute; top: 0; right: 0; height: 100%; width: min(420px, 92vw); background: var(--bg2); border-left: 1px solid var(--amber); padding: 18px; overflow-y: auto; transform: translateX(100%); transition: transform 0.2s; }
+      .drawer-toggle:checked ~ .drawer { pointer-events: auto; opacity: 1; }
+      .drawer-toggle:checked ~ .drawer .drawer-panel { transform: none; }
+      .drawer-close { float: right; color: var(--red); cursor: pointer; font-size: 18px; }
+
+      @media (max-width: 900px) {
+        .grid { grid-template-columns: 1fr; }
+        .console { border-right: none; border-bottom: 1px solid var(--grid); }
+        .summary-strip { grid-template-columns: 1fr 1fr; }
+        .planner-grid, .plan-result-grid { grid-template-columns: 1fr 1fr; }
+      }
+    </style>
   </head>
   <body>
-    <main class="shell">
-      <section class="topbar" aria-label="Application header">
-        <div>
-          <p class="eyebrow">Local Czech tax helper</p>
-          <h1>Invest Tax Calc</h1>
-        </div>
-        <div class="status-pill" id="serverStatus">Local only</div>
-      </section>
+    <input type="checkbox" id="gmailDrawerToggle" class="drawer-toggle" hidden />
+    <div class="topbar">
+      <div class="logo">ITC<b>//</b>TERMINAL</div>
+      <div class="ticker">
+        <span>SES <b id="serverStatus">Local only</b></span>
+        <span>MKT <b>CZ · §10</b></span>
+        <span>NODE <b>127.0.0.1</b></span>
+      </div>
+    </div>
 
-      <section class="workspace">
-        <aside class="controls" aria-label="Inputs">
-          <label class="upload-zone" for="pdfFile">
-            <span class="upload-icon">PDF</span>
-            <strong>Trading 212 statement</strong>
-            <span id="fileName">Choose a PDF file</span>
+    <div class="grid">
+      <aside class="console">
+        <div class="blk">
+          <div class="blk-title">Source</div>
+          <label class="upload" for="pdfFile">
+            <b>LOAD T212.PDF</b>
+            <span id="fileName">no file selected</span>
             <input id="pdfFile" type="file" accept=".pdf,application/pdf" />
           </label>
-
-          <section class="control-section" aria-label="Gmail import">
-            <div class="control-heading">
-              <div>
-                <p class="eyebrow">Gmail import</p>
-                <h2>Broker attachments</h2>
-              </div>
-              <span class="scope-pill">Read only</span>
-            </div>
-
-            <label>
-              Gmail query
-              <input id="gmailQuery" type="text" value="from:trading212 has:attachment filename:pdf" />
-            </label>
-
-            <div id="gmailReady" class="gmail-status hidden"></div>
-
-            <div id="gmailSetup" class="gmail-setup hidden">
-              <label>
-                credentials.json
-                <textarea id="gmailCredentials" spellcheck="false" placeholder='{"installed":{"client_id":"...","client_secret":"..."}}'></textarea>
-              </label>
-              <button id="gmailSetupBtn" type="button">Save Gmail setup</button>
-            </div>
-
-            <div class="field-row">
-              <label>
-                Max messages
-                <input id="gmailMaxMessages" type="number" min="1" max="500" value="500" />
-              </label>
-              <label>
-                Output
-                <input id="gmailOutput" type="text" value="imports/email_reports" />
-              </label>
-            </div>
-
-            <button id="gmailBtn" type="button" disabled>Connect Gmail</button>
-            <div id="gmailStatus" class="gmail-status hidden"></div>
-            <div id="gmailFiles" class="gmail-files hidden"></div>
-          </section>
-
-          <div class="field-row">
-            <label>
-              Tax year
-              <input id="taxYear" type="number" min="2000" max="2100" />
-            </label>
-            <label>
-              As of
-              <input id="asOf" type="date" />
-            </label>
+          <span class="gmail-open" onclick="document.getElementById('gmailDrawerToggle').checked=true">&gt;&gt; gmail import</span>
+        </div>
+        <div class="blk">
+          <div class="blk-title">Parameters</div>
+          <div class="row2">
+            <label>TAX_YR<input id="taxYear" type="number" min="2000" max="2100" /></label>
+            <label>AS_OF<input id="asOf" type="date" /></label>
           </div>
-
-          <label>
-            CZK FX rates
-            <textarea id="rates" spellcheck="false">USD=23.20
+          <label>FX_CZK<textarea id="rates" spellcheck="false">USD=23.20
 EUR=25.10
-GBP=29.40</textarea>
-          </label>
+GBP=29.40</textarea></label>
+          <button id="analyzeBtn" type="button">▶ RUN ANALYSIS</button>
+        </div>
+        <div class="blk">
+          <p class="fineprint">// all compute is local. no data leaves 127.0.0.1. read-only broker access.</p>
+        </div>
+      </aside>
 
-          <button id="analyzeBtn" type="button">
-            <span aria-hidden="true">↻</span>
-            Analyze report
-          </button>
-
-          <p class="fineprint">
-            No data leaves this machine. The app only talks to the local Python server.
-          </p>
-        </aside>
-
-        <section class="results" aria-live="polite">
+      <main class="stage">
+        <div class="stage-body">
           <div id="emptyState" class="empty-state">
-            <div class="empty-mark">212</div>
-            <h2>Drop in your Trading 212 PDF statement to start.</h2>
-            <p>
-              The first pass will show annual sale proceeds, taxable gains, open lots,
-              and dates when holdings become time-test exempt.
-            </p>
+            <div class="empty-mark">awaiting input stream</div>
+            <h2>Load a Trading 212 PDF to begin analysis</h2>
+            <p>Output stream: annual sale proceeds, taxable gains, open lots, and the dates each holding clears the 3-year time test.</p>
+            <div class="empty-steps"><span><i>[1]</i> load / import</span><span><i>[2]</i> set params</span><span><i>[3]</i> run</span></div>
           </div>
 
           <div id="errorBox" class="error-box hidden"></div>
@@ -115,102 +216,108 @@ GBP=29.40</textarea>
             <section class="summary-strip" id="summaryStrip"></section>
 
             <section class="panel planner">
-              <div class="panel-heading">
-                <div>
-                  <p class="eyebrow">Sell planner</p>
-                  <h2>Estimate one future sale</h2>
-                </div>
-                <button id="planBtn" type="button">
-                  <span aria-hidden="true">→</span>
-                  Run plan
-                </button>
-              </div>
-
+              <div class="panel-heading"><div><p class="eyebrow">Sell planner</p><h2>SIMULATE_SALE</h2></div><button id="planBtn" type="button">▶ PLAN</button></div>
               <div class="planner-grid">
-                <label>
-                  Instrument
-                  <select id="planInstrument"></select>
-                </label>
-                <label>
-                  Quantity
-                  <input id="planQuantity" type="number" min="0" step="0.000001" />
-                </label>
-                <label>
-                  CZK price/share
-                  <input id="planPrice" type="number" min="0" step="0.01" />
-                </label>
-                <label>
-                  Sale date
-                  <input id="planDate" type="date" />
-                </label>
+                <label>INSTRUMENT<select id="planInstrument"></select></label>
+                <label>QTY<input id="planQuantity" type="number" min="0" step="0.000001" /></label>
+                <label>PX/SHARE CZK<input id="planPrice" type="number" min="0" step="0.01" /></label>
+                <label>SALE_DATE<input id="planDate" type="date" /></label>
               </div>
-
               <div id="planResult" class="plan-result hidden"></div>
             </section>
 
             <section class="panel">
-              <div class="panel-heading">
-                <div>
-                  <p class="eyebrow">Open positions</p>
-                  <h2>Holdings and time-test dates</h2>
-                </div>
-              </div>
-              <div class="table-wrap">
-                <table>
-                  <thead>
-                    <tr>
-                      <th>Instrument</th>
-                      <th>Qty</th>
-                      <th>Avg cost CZK</th>
-                      <th>Tax-free now</th>
-                      <th>Next tax-free date</th>
-                    </tr>
-                  </thead>
-                  <tbody id="holdingsBody"></tbody>
-                </table>
-              </div>
+              <div class="panel-heading"><div><p class="eyebrow">Open positions</p><h2>HOLDINGS</h2></div></div>
+              <table><thead><tr><th>Instrument</th><th>Qty</th><th>Avg cost CZK</th><th>Tax-free now</th><th>Next tax-free date</th></tr></thead><tbody id="holdingsBody"></tbody></table>
             </section>
 
             <section class="panel">
-              <div class="panel-heading">
-                <div>
-                  <p class="eyebrow">Matched sells</p>
-                  <h2>Tax lots for selected year</h2>
-                </div>
-              </div>
-              <div class="table-wrap">
-                <table>
-                  <thead>
-                    <tr>
-                      <th>Instrument</th>
-                      <th>Sale</th>
-                      <th>Buy</th>
-                      <th>Qty</th>
-                      <th>Proceeds</th>
-                      <th>Cost</th>
-                      <th>Gain</th>
-                      <th>Status</th>
-                    </tr>
-                  </thead>
-                  <tbody id="matchesBody"></tbody>
-                </table>
-              </div>
+              <div class="panel-heading"><div><p class="eyebrow">Matched sells</p><h2>TAX_LOTS</h2></div></div>
+              <table><thead><tr><th>Instrument</th><th>Sale</th><th>Buy</th><th>Qty</th><th>Proceeds</th><th>Cost</th><th>Gain</th><th>Status</th></tr></thead><tbody id="matchesBody"></tbody></table>
             </section>
 
             <section id="warningsPanel" class="panel warning-panel hidden">
-              <div class="panel-heading">
-                <div>
-                  <p class="eyebrow">Review</p>
-                  <h2>Warnings</h2>
-                </div>
-              </div>
+              <div class="panel-heading"><div><p class="eyebrow">Review</p><h2>WARNINGS</h2></div></div>
               <ul id="warningsList"></ul>
             </section>
           </div>
-        </section>
-      </section>
-    </main>
+        </div>
+
+        <div class="statusbar">
+          <span>STATUS <b id="termStatus" class="term-status">READY</b></span>
+          <span>ENGINE <b>pypdf · §10 matcher</b></span>
+          <span>MODE <b>OFFLINE</b></span>
+        </div>
+      </main>
+    </div>
+
+    <div class="drawer">
+      <label class="drawer-scrim" for="gmailDrawerToggle"></label>
+      <aside class="drawer-panel">
+        <span class="drawer-close" onclick="document.getElementById('gmailDrawerToggle').checked=false">×</span>
+        <div class="blk-title">Gmail import <span class="scope-pill">read-only</span></div>
+        <p class="fineprint">Pull T212 PDF statements from inbox. Read-only. Local.</p>
+        <label style="margin-top:14px">QUERY<input id="gmailQuery" type="text" value="from:trading212 has:attachment filename:pdf" /></label>
+        <div id="gmailReady" class="gmail-status hidden"></div>
+        <div id="gmailSetup" class="gmail-setup hidden">
+          <label>credentials.json<textarea id="gmailCredentials" spellcheck="false" placeholder='{"installed":{"client_id":"...","client_secret":"..."}}'></textarea></label>
+          <button id="gmailSetupBtn" type="button">SAVE SETUP</button>
+        </div>
+        <div class="row2">
+          <label>MAX_MSG<input id="gmailMaxMessages" type="number" min="1" max="500" value="500" /></label>
+          <label>OUTPUT<input id="gmailOutput" type="text" value="imports/email_reports" /></label>
+        </div>
+        <label class="check-row"><input id="gmailReparseCachedPdfs" type="checkbox" /><span>Re-parse cached PDFs</span></label>
+        <div class="gmail-actions">
+          <button id="gmailConnectBtn" type="button" disabled>CONNECT GMAIL</button>
+          <button id="gmailFetchBtn" type="button" disabled>FETCH REPORTS</button>
+          <button id="gmailCancelBtn" type="button" class="danger-button hidden">STOP</button>
+        </div>
+        <div id="gmailStatus" class="gmail-status hidden"></div>
+        <div id="gmailFiles" class="gmail-files hidden"></div>
+      </aside>
+    </div>
 
     <script src="/static/app.js"></script>
+    <script>
+      // Drive the terminal STATUS readout from the live work happening in app.js.
+      //  - analyze (manual or Gmail-triggered): app.js disables #analyzeBtn
+      //  - Gmail import: app.js shows + enables #gmailCancelBtn and updates the
+      //    phase label inside #gmailStatus (Finding messages, Downloading, ...).
+      // We mirror whichever is active into STATUS, with a cycling-dots "busy" state.
+      (function () {
+        var term = document.getElementById("termStatus");
+        var analyzeBtn = document.getElementById("analyzeBtn");
+        var cancelBtn = document.getElementById("gmailCancelBtn");
+        var gmailStatus = document.getElementById("gmailStatus");
+        if (!term || !analyzeBtn) return;
+
+        function gmailPhase() {
+          var strong = gmailStatus && gmailStatus.querySelector("strong");
+          var text = ((strong && strong.textContent) || "").trim();
+          return text ? text.toUpperCase() : "IMPORTING";
+        }
+
+        function refresh() {
+          var label = "READY";
+          var busy = false;
+          if (analyzeBtn.disabled) {
+            label = "ANALYZING";
+            busy = true;
+          } else if (cancelBtn && !cancelBtn.disabled && !cancelBtn.classList.contains("hidden")) {
+            label = gmailPhase();
+            busy = true;
+          }
+          term.textContent = label;
+          term.classList.toggle("busy", busy);
+        }
+
+        var obs = new MutationObserver(refresh);
+        obs.observe(analyzeBtn, { attributes: true, attributeFilter: ["disabled"] });
+        if (cancelBtn) obs.observe(cancelBtn, { attributes: true, attributeFilter: ["disabled", "class"] });
+        if (gmailStatus) obs.observe(gmailStatus, { childList: true, subtree: true, characterData: true });
+        refresh();
+      })();
+    </script>
   </body>
 </html>
