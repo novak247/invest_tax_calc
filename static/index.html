@@ -4,6 +4,12 @@
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>Invest Tax Calc</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link
+      href="https://fonts.googleapis.com/css2?family=Fraunces:opsz,wght@9..144,400;9..144,500;9..144,600;9..144,700&family=Spline+Sans:wght@400;500;600;700&family=Spline+Sans+Mono:wght@400;500;600&display=swap"
+      rel="stylesheet"
+    />
     <link rel="stylesheet" href="/static/styles.css" />
   </head>
   <body>
@@ -18,11 +24,11 @@
 
       <section class="workspace">
         <aside class="controls" aria-label="Inputs">
-          <label class="upload-zone" for="csvFile">
-            <span class="upload-icon">CSV</span>
-            <strong>Trading 212 report</strong>
-            <span id="fileName">Choose a CSV file</span>
-            <input id="csvFile" type="file" accept=".csv,text/csv" />
+          <label class="upload-zone" for="pdfFile">
+            <span class="upload-icon">PDF</span>
+            <strong>Trading 212 statement</strong>
+            <span id="fileName">Choose a PDF file</span>
+            <input id="pdfFile" type="file" accept=".pdf,application/pdf" />
           </label>
 
           <section class="control-section" aria-label="Gmail import">
@@ -36,23 +42,23 @@
 
             <label>
               Gmail query
-              <input id="gmailQuery" type="text" value="from:trading212 has:attachment filename:csv" />
+              <input id="gmailQuery" type="text" value="from:trading212 has:attachment filename:pdf" />
             </label>
 
-            <label>
-              Client ID
-              <input id="gmailClientId" type="text" autocomplete="off" placeholder="GMAIL_CLIENT_ID" />
-            </label>
+            <div id="gmailReady" class="gmail-status hidden"></div>
 
-            <label>
-              Client secret
-              <input id="gmailClientSecret" type="password" autocomplete="off" placeholder="Optional" />
-            </label>
+            <div id="gmailSetup" class="gmail-setup hidden">
+              <label>
+                credentials.json
+                <textarea id="gmailCredentials" spellcheck="false" placeholder='{"installed":{"client_id":"...","client_secret":"..."}}'></textarea>
+              </label>
+              <button id="gmailSetupBtn" type="button">Save Gmail setup</button>
+            </div>
 
             <div class="field-row">
               <label>
                 Max messages
-                <input id="gmailMaxMessages" type="number" min="1" max="500" value="200" />
+                <input id="gmailMaxMessages" type="number" min="1" max="500" value="500" />
               </label>
               <label>
                 Output
@@ -60,7 +66,7 @@
               </label>
             </div>
 
-            <button id="gmailBtn" type="button">Connect Gmail</button>
+            <button id="gmailBtn" type="button" disabled>Connect Gmail</button>
             <div id="gmailStatus" class="gmail-status hidden"></div>
             <div id="gmailFiles" class="gmail-files hidden"></div>
           </section>
@@ -75,16 +81,6 @@
               <input id="asOf" type="date" />
             </label>
           </div>
-
-          <label>
-            Default CSV currency
-            <select id="defaultCurrency">
-              <option>CZK</option>
-              <option>EUR</option>
-              <option>USD</option>
-              <option>GBP</option>
-            </select>
-          </label>
 
           <label>
             CZK FX rates
@@ -106,7 +102,7 @@ GBP=29.40</textarea>
         <section class="results" aria-live="polite">
           <div id="emptyState" class="empty-state">
             <div class="empty-mark">212</div>
-            <h2>Drop in your Trading 212 CSV to start.</h2>
+            <h2>Drop in your Trading 212 PDF statement to start.</h2>
             <p>
               The first pass will show annual sale proceeds, taxable gains, open lots,
               and dates when holdings become time-test exempt.

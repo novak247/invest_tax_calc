@@ -4,7 +4,9 @@ version = "0.1.0"
 description = "Local Czech tax helper for Trading 212 stock and ETF activity"
 readme = "README.md"
 requires-python = ">=3.11"
-dependencies = []
+dependencies = [
+    "pypdf>=6.12.2",
+]
 
 [tool.uv]
 package = false

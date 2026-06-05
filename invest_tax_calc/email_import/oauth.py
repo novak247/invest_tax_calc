@@ -40,9 +40,9 @@ GMAIL_OAUTH = OAuthProvider(
     client_id_env="GMAIL_CLIENT_ID",
     client_secret_env="GMAIL_CLIENT_SECRET",
     authorization_params={
-        "access_type": "online",
+        "access_type": "offline",
         "include_granted_scopes": "false",
-        "prompt": "select_account",
+        "prompt": "consent select_account",
     },
 )
 
@@ -147,6 +147,32 @@ def exchange_code_for_token(
         "code_verifier": code_verifier,
         "grant_type": "authorization_code",
         "redirect_uri": redirect_uri,
+    }
+    if client_secret:
+        payload["client_secret"] = client_secret
+
+    body = urllib.parse.urlencode(payload).encode("utf-8")
+    request = urllib.request.Request(
+        provider.token_url,
+        data=body,
+        headers={"Content-Type": "application/x-www-form-urlencoded"},
+        method="POST",
+    )
+    with urllib.request.urlopen(request, timeout=30) as response:
+        return json.loads(response.read().decode("utf-8"))
+
+
+def refresh_access_token(
+    provider: OAuthProvider,
+    *,
+    client_id: str,
+    client_secret: str | None,
+    refresh_token: str,
+) -> dict:
+    payload = {
+        "client_id": client_id,
+        "grant_type": "refresh_token",
+        "refresh_token": refresh_token,
     }
     if client_secret:
         payload["client_secret"] = client_secret

@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import argparse
+import base64
+import binascii
 import json
 import mimetypes
 import os
@@ -21,19 +23,31 @@ from invest_tax_calc.email_import.oauth import (
     _new_code_verifier,
     build_authorization_url,
     exchange_code_for_token,
+    refresh_access_token,
 )
 from invest_tax_calc.email_import.providers import Attachment, GmailClient
 from invest_tax_calc.email_import.scopes import GMAIL_READONLY_SCOPE
 from invest_tax_calc.email_import.storage import AttachmentStore, ImportLedger
-from invest_tax_calc.t212 import parse_trading212_csv
+from invest_tax_calc.t212_pdf import parse_trading212_pdf
 from invest_tax_calc.tax import analyze_transactions, parse_rate_table, plan_sale
+
+
+class ReloadFriendlyHTTPServer(ThreadingHTTPServer):
+    allow_reuse_address = True
+    daemon_threads = True
 
 
 ROOT = Path(__file__).resolve().parent
 STATIC_DIR = ROOT / "static"
 GMAIL_CALLBACK_PATH = "/oauth/gmail/callback"
-GMAIL_DEFAULT_QUERY = "from:trading212 has:attachment filename:csv"
+GMAIL_DEFAULT_QUERY = "from:trading212 has:attachment filename:pdf"
+APP_DATA_DIR = ROOT / ".invest_tax_calc"
+GMAIL_CONFIG_PATH = APP_DATA_DIR / "gmail_oauth_client.json"
+GMAIL_TOKEN_PATH = APP_DATA_DIR / "gmail_token.json"
 DEV_RELOAD_TOKEN = f"{os.getpid()}:{time.time_ns()}"
+# Bundling a full history of Trading 212 PDF statements (hundreds of distinct
+# reports, base64-encoded) easily exceeds tens of MB in a single analyze POST.
+MAX_UPLOAD_BYTES = 128 * 1024 * 1024
 GMAIL_IMPORT_LOCK = threading.Lock()
 GMAIL_IMPORTS: dict[str, "GmailImportSession"] = {}
 WATCH_SUFFIXES = {".py", ".html", ".css", ".js", ".toml"}
@@ -57,6 +71,13 @@ class AppError(Exception):
 
 
 @dataclass
+class GmailOAuthConfig:
+    client_id: str
+    client_secret: str | None = None
+    source: str = "local"
+
+
+@dataclass
 class GmailImportSession:
     state: str
     code_verifier: str
@@ -69,10 +90,15 @@ class GmailImportSession:
     ledger: Path
     status: str = "waiting"
     message: str = "Waiting for Google approval."
+    progress_phase: str = "waiting"
+    total_messages: int = 0
+    processed_messages: int = 0
+    total_attachments: int = 0
+    processed_attachments: int = 0
     saved: int = 0
     skipped: int = 0
     files: list[dict[str, Any]] = field(default_factory=list)
-    csv_files: list[dict[str, Any]] = field(default_factory=list)
+    pdf_files: list[dict[str, Any]] = field(default_factory=list)
     error: str | None = None
     created_at: float = field(default_factory=time.time)
 
@@ -85,6 +111,129 @@ def _resolve_project_path(value: str) -> Path:
     if resolved != project_root and project_root not in resolved.parents:
         raise AppError("Import paths must stay inside this project.")
     return resolved
+
+
+def _looks_like_pdf(filename: str, content_type: str, encoding: str) -> bool:
+    return (
+        filename.lower().endswith(".pdf")
+        or content_type.lower() == "application/pdf"
+        or encoding.lower() == "base64"
+    )
+
+
+def _decode_upload_bytes(content: str, encoding: str) -> bytes:
+    if encoding.lower() != "base64":
+        return content.encode("utf-8")
+
+    try:
+        return base64.b64decode(content, validate=True)
+    except (binascii.Error, ValueError) as exc:
+        raise AppError("Invalid PDF upload encoding.") from exc
+
+
+def _parse_gmail_oauth_credentials(text: str) -> GmailOAuthConfig:
+    try:
+        data = json.loads(text)
+    except json.JSONDecodeError as exc:
+        raise AppError(f"Invalid Google credentials JSON: {exc}") from exc
+    if not isinstance(data, dict):
+        raise AppError("Google credentials JSON must be an object.")
+
+    source = str(data.get("source") or "raw")
+    client_data: dict[str, Any] = data
+    if isinstance(data.get("installed"), dict):
+        source = "installed"
+        client_data = data["installed"]
+    elif isinstance(data.get("web"), dict):
+        source = "web"
+        client_data = data["web"]
+
+    client_id = str(client_data.get("client_id") or "").strip()
+    client_secret = str(client_data.get("client_secret") or "").strip() or None
+    if not client_id:
+        raise AppError("Google credentials JSON is missing client_id.")
+
+    return GmailOAuthConfig(
+        client_id=client_id,
+        client_secret=client_secret,
+        source=source,
+    )
+
+
+def _load_gmail_oauth_config() -> GmailOAuthConfig | None:
+    if GMAIL_CONFIG_PATH.exists():
+        return _parse_gmail_oauth_credentials(GMAIL_CONFIG_PATH.read_text(encoding="utf-8"))
+
+    client_id = os.getenv("GMAIL_CLIENT_ID", "").strip()
+    if client_id:
+        return GmailOAuthConfig(
+            client_id=client_id,
+            client_secret=os.getenv("GMAIL_CLIENT_SECRET", "").strip() or None,
+            source="env",
+        )
+    return None
+
+
+def _save_gmail_oauth_config(config: GmailOAuthConfig) -> None:
+    APP_DATA_DIR.mkdir(parents=True, exist_ok=True)
+    payload = {
+        "client_id": config.client_id,
+        "client_secret": config.client_secret or "",
+        "source": config.source,
+    }
+    GMAIL_CONFIG_PATH.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+
+
+def _gmail_config_payload() -> dict[str, Any]:
+    config = _load_gmail_oauth_config()
+    if not config:
+        return {
+            "configured": False,
+            "message": "Gmail setup is missing.",
+            "tokenCached": False,
+        }
+
+    return {
+        "configured": True,
+        "message": "Gmail setup is ready.",
+        "clientIdPreview": _preview_client_id(config.client_id),
+        "source": config.source,
+        "tokenCached": bool(_load_gmail_refresh_token(config)),
+    }
+
+
+def _preview_client_id(client_id: str) -> str:
+    if len(client_id) <= 18:
+        return client_id
+    return f"{client_id[:8]}...{client_id[-10:]}"
+
+
+def _load_gmail_refresh_token(config: GmailOAuthConfig) -> str | None:
+    if not GMAIL_TOKEN_PATH.exists():
+        return None
+    try:
+        data = json.loads(GMAIL_TOKEN_PATH.read_text(encoding="utf-8"))
+    except (json.JSONDecodeError, OSError):
+        return None
+    if data.get("client_id") != config.client_id:
+        return None
+    token = str(data.get("refresh_token") or "").strip()
+    return token or None
+
+
+def _save_gmail_refresh_token(config: GmailOAuthConfig, token: dict[str, Any]) -> None:
+    refresh_token = str(token.get("refresh_token") or "").strip()
+    if not refresh_token:
+        return
+
+    APP_DATA_DIR.mkdir(parents=True, exist_ok=True)
+    payload = {
+        "client_id": config.client_id,
+        "refresh_token": refresh_token,
+        "scope": token.get("scope", ""),
+        "saved_at_unix": time.time(),
+    }
+    GMAIL_TOKEN_PATH.write_text(json.dumps(payload, indent=2), encoding="utf-8")
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -105,6 +254,10 @@ class Handler(BaseHTTPRequestHandler):
 
             if path == "/api/email/gmail/status":
                 self._send_json(self._handle_gmail_status(parsed))
+                return
+
+            if path == "/api/email/gmail/config":
+                self._send_json(_gmail_config_payload())
                 return
 
             if path == "/api/dev/reload-state":
@@ -151,6 +304,12 @@ class Handler(BaseHTTPRequestHandler):
                 self._send_json(result)
                 return
 
+            if self.path == "/api/email/gmail/config":
+                payload = self._read_json()
+                result = self._handle_gmail_config_save(payload)
+                self._send_json(result)
+                return
+
             self._send_json({"error": "Not found"}, status=404)
         except AppError as exc:
             self._send_json({"error": str(exc)}, status=exc.status)
@@ -158,25 +317,19 @@ class Handler(BaseHTTPRequestHandler):
             self._send_json({"error": f"Unexpected error: {exc}"}, status=500)
 
     def log_message(self, fmt: str, *args: Any) -> None:
+        path = self.path.split("?", 1)[0]
+        if path in {"/api/dev/reload-state", "/api/email/gmail/status"}:
+            return
         print(f"{self.address_string()} - {fmt % args}")
 
     def _handle_analyze(self, payload: dict[str, Any]) -> dict[str, Any]:
-        content = str(payload.get("content") or "")
-        if not content.strip():
-            raise AppError("Upload a Trading 212 CSV first.")
-
         rates = parse_rate_table(str(payload.get("rates") or ""))
-        default_currency = str(payload.get("defaultCurrency") or "CZK")
         tax_year = int(payload.get("taxYear") or 0) or None
         as_of = str(payload.get("asOf") or "")
 
-        transactions = parse_trading212_csv(
-            content,
-            filename=str(payload.get("filename") or "trading212.csv"),
-            default_currency=default_currency,
-        )
+        transactions = self._parse_report_transactions(payload)
         if not transactions:
-            raise AppError("No Trading 212 buy or sell orders were found in this CSV.")
+            raise AppError("No Trading 212 buy or sell orders were found in this report.")
 
         return analyze_transactions(
             transactions,
@@ -186,16 +339,8 @@ class Handler(BaseHTTPRequestHandler):
         )
 
     def _handle_plan(self, payload: dict[str, Any]) -> dict[str, Any]:
-        content = str(payload.get("content") or "")
-        if not content.strip():
-            raise AppError("Upload a Trading 212 CSV first.")
-
         rates = parse_rate_table(str(payload.get("rates") or ""))
-        transactions = parse_trading212_csv(
-            content,
-            filename=str(payload.get("filename") or "trading212.csv"),
-            default_currency=str(payload.get("defaultCurrency") or "CZK"),
-        )
+        transactions = self._parse_report_transactions(payload)
 
         return plan_sale(
             transactions,
@@ -206,15 +351,51 @@ class Handler(BaseHTTPRequestHandler):
             sale_date=str(payload.get("saleDate") or ""),
         )
 
-    def _handle_gmail_start(self, payload: dict[str, Any]) -> dict[str, Any]:
-        client_id = str(payload.get("clientId") or "").strip() or os.getenv("GMAIL_CLIENT_ID", "").strip()
-        if not client_id:
-            raise AppError("Missing Gmail OAuth client ID. Paste it here or set GMAIL_CLIENT_ID.")
+    def _parse_report_transactions(self, payload: dict[str, Any]) -> list:
+        reports = payload.get("reports")
+        if isinstance(reports, list) and reports:
+            transactions = []
+            for index, report in enumerate(reports, start=1):
+                if not isinstance(report, dict):
+                    raise AppError("Report uploads must be objects.")
+                transactions.extend(self._parse_one_pdf_report(report, fallback_name=f"statement-{index}.pdf"))
+            return transactions
 
-        client_secret = str(payload.get("clientSecret") or "").strip() or os.getenv("GMAIL_CLIENT_SECRET", "").strip()
+        return self._parse_one_pdf_report(payload, fallback_name="trading212.pdf")
+
+    def _parse_one_pdf_report(self, payload: dict[str, Any], *, fallback_name: str) -> list:
+        content = str(payload.get("content") or "")
+        if not content.strip():
+            raise AppError("Upload a Trading 212 PDF statement first.")
+
+        filename = str(payload.get("filename") or fallback_name)
+        content_type = str(payload.get("contentType") or "")
+        encoding = str(payload.get("contentEncoding") or "text")
+
+        if not _looks_like_pdf(filename, content_type, encoding):
+            raise AppError("This app now expects Trading 212 PDF statements.")
+
+        return parse_trading212_pdf(
+            _decode_upload_bytes(content, encoding),
+            filename=filename,
+        )
+
+    def _handle_gmail_config_save(self, payload: dict[str, Any]) -> dict[str, Any]:
+        raw_credentials = str(payload.get("credentialsJson") or "").strip()
+        if not raw_credentials:
+            raise AppError("Paste the Google OAuth credentials JSON first.")
+        config = _parse_gmail_oauth_credentials(raw_credentials)
+        _save_gmail_oauth_config(config)
+        return _gmail_config_payload()
+
+    def _handle_gmail_start(self, payload: dict[str, Any]) -> dict[str, Any]:
+        config = _load_gmail_oauth_config()
+        if not config:
+            raise AppError("Gmail is not set up yet. Save Google credentials.json once, then connect.")
+
         query = str(payload.get("query") or "").strip() or GMAIL_DEFAULT_QUERY
         try:
-            max_messages = int(payload.get("maxMessages") or 200)
+            max_messages = int(payload.get("maxMessages") or 500)
         except (TypeError, ValueError) as exc:
             raise AppError("Gmail max messages must be a number.") from exc
         if max_messages < 1 or max_messages > 500:
@@ -225,18 +406,11 @@ class Handler(BaseHTTPRequestHandler):
         state = secrets.token_urlsafe(32)
         verifier = _new_code_verifier()
         redirect_uri = f"{self._base_url()}{GMAIL_CALLBACK_PATH}"
-        auth_url = build_authorization_url(
-            GMAIL_OAUTH,
-            client_id=client_id,
-            redirect_uri=redirect_uri,
-            state=state,
-            code_challenge=_code_challenge(verifier),
-        )
         session = GmailImportSession(
             state=state,
             code_verifier=verifier,
-            client_id=client_id,
-            client_secret=client_secret or None,
+            client_id=config.client_id,
+            client_secret=config.client_secret,
             redirect_uri=redirect_uri,
             query=query,
             max_messages=max_messages,
@@ -246,6 +420,35 @@ class Handler(BaseHTTPRequestHandler):
         with GMAIL_IMPORT_LOCK:
             GMAIL_IMPORTS[state] = session
 
+        refresh_token = _load_gmail_refresh_token(config)
+        if refresh_token:
+            _update_gmail_session(
+                state,
+                status="importing",
+                progress_phase="authorizing",
+                message="Using saved Gmail login. Importing attachments.",
+            )
+            thread = threading.Thread(
+                target=_import_gmail_attachments_with_refresh_token,
+                args=(state, refresh_token),
+                daemon=True,
+            )
+            thread.start()
+            return {
+                "state": state,
+                "authUrl": "",
+                "requestedScope": GMAIL_READONLY_SCOPE,
+                "status": "importing",
+                "message": "Using saved Gmail login. Importing attachments.",
+            }
+
+        auth_url = build_authorization_url(
+            GMAIL_OAUTH,
+            client_id=config.client_id,
+            redirect_uri=redirect_uri,
+            state=state,
+            code_challenge=_code_challenge(verifier),
+        )
         return {
             "state": state,
             "authUrl": auth_url,
@@ -300,6 +503,7 @@ class Handler(BaseHTTPRequestHandler):
         _update_gmail_session(
             session.state,
             status="importing",
+            progress_phase="authorizing",
             message="Connected. Importing Gmail attachments.",
         )
         thread = threading.Thread(
@@ -314,8 +518,16 @@ class Handler(BaseHTTPRequestHandler):
         length = int(self.headers.get("Content-Length") or "0")
         if length <= 0:
             raise AppError("Missing request body.")
-        if length > 25 * 1024 * 1024:
-            raise AppError("Upload is too large for this local MVP.")
+        if length > MAX_UPLOAD_BYTES:
+            # Drain the incoming body first; otherwise the client is still
+            # uploading when we respond and the reset connection surfaces in the
+            # browser as an opaque "Failed to fetch" instead of this message.
+            self._drain_request_body(length)
+            megabytes = length // (1024 * 1024)
+            raise AppError(
+                f"Upload is too large for this local MVP ({megabytes} MB). "
+                "Import fewer statements at once."
+            )
 
         raw = self.rfile.read(length)
         try:
@@ -325,6 +537,14 @@ class Handler(BaseHTTPRequestHandler):
         if not isinstance(payload, dict):
             raise AppError("Expected a JSON object.")
         return payload
+
+    def _drain_request_body(self, length: int) -> None:
+        remaining = length
+        while remaining > 0:
+            chunk = self.rfile.read(min(remaining, 1024 * 1024))
+            if not chunk:
+                break
+            remaining -= len(chunk)
 
     def _send_file(self, path: Path) -> None:
         if not path.exists() or not path.is_file():
@@ -395,12 +615,21 @@ def _gmail_session_payload(session: GmailImportSession) -> dict[str, Any]:
             "message": session.message,
             "query": session.query,
             "maxMessages": session.max_messages,
+            "progress": {
+                "phase": session.progress_phase,
+                "totalMessages": session.total_messages,
+                "processedMessages": session.processed_messages,
+                "totalAttachments": session.total_attachments,
+                "processedAttachments": session.processed_attachments,
+                "saved": session.saved,
+                "skipped": session.skipped,
+            },
             "output": str(session.output),
             "ledger": str(session.ledger),
             "saved": session.saved,
             "skipped": session.skipped,
             "files": list(session.files),
-            "csvFiles": list(session.csv_files),
+            "pdfFiles": list(session.pdf_files) if session.status == "done" else [],
             "error": session.error,
         }
 
@@ -424,46 +653,144 @@ def _import_gmail_attachments(state: str, code: str) -> None:
         if not access_token:
             raise RuntimeError("OAuth token response did not include an access token.")
 
+        _save_gmail_refresh_token(
+            GmailOAuthConfig(
+                client_id=session.client_id,
+                client_secret=session.client_secret,
+                source="session",
+            ),
+            token,
+        )
+        _import_gmail_attachments_with_access_token(state, access_token)
+    except Exception as exc:  # pragma: no cover - network/provider boundary
+        _update_gmail_session(
+            state,
+            status="error",
+            message=f"Gmail import failed: {exc}",
+            error=str(exc),
+        )
+
+
+def _import_gmail_attachments_with_refresh_token(state: str, refresh_token: str) -> None:
+    session = _get_gmail_session(state)
+    try:
+        token = refresh_access_token(
+            GMAIL_OAUTH,
+            client_id=session.client_id,
+            client_secret=session.client_secret,
+            refresh_token=refresh_token,
+        )
+        granted_scope = token.get("scope")
+        if granted_scope:
+            GMAIL_OAUTH.scope_policy.validate_granted(granted_scope)
+
+        access_token = token.get("access_token")
+        if not access_token:
+            raise RuntimeError("Refresh response did not include an access token.")
+
+        _import_gmail_attachments_with_access_token(state, access_token)
+    except Exception as exc:  # pragma: no cover - network/provider boundary
+        _update_gmail_session(
+            state,
+            status="error",
+            message=f"Saved Gmail login failed: {exc}. Connect Gmail again.",
+            error=str(exc),
+        )
+
+
+def _import_gmail_attachments_with_access_token(state: str, access_token: str) -> None:
+    session = _get_gmail_session(state)
+    try:
         ledger = ImportLedger(session.ledger)
         store = AttachmentStore(session.output, ledger)
         client = GmailClient(access_token)
         files: list[dict[str, Any]] = []
-        csv_files: list[dict[str, Any]] = []
+        pdf_files: list[dict[str, Any]] = []
         saved = 0
         skipped = 0
 
-        attachments = client.iter_report_attachments(
-            query=session.query,
-            max_messages=session.max_messages,
+        _update_gmail_session(
+            state,
+            progress_phase="listing",
+            message="Finding matching Gmail messages.",
         )
-        for attachment in attachments:
-            result = store.save_attachment(attachment)
-            if result.saved:
-                saved += 1
-            else:
-                skipped += 1
-
-            files.append(
-                {
-                    "filename": attachment.filename,
-                    "path": str(result.path),
-                    "saved": result.saved,
-                    "sha256": result.sha256,
-                    "contentType": attachment.content_type,
-                }
+        message_ids = list(
+            client.iter_message_ids(
+                query=session.query,
+                max_messages=session.max_messages,
             )
-            csv_payload = _csv_payload(attachment, result.path)
-            if csv_payload:
-                csv_files.append(csv_payload)
+        )
+        _update_gmail_session(
+            state,
+            progress_phase="downloading",
+            total_messages=len(message_ids),
+            processed_messages=0,
+            total_attachments=0,
+            processed_attachments=0,
+            message=f"Found {len(message_ids)} matching Gmail message(s). Downloading attachments.",
+        )
+
+        for processed_messages, message_id in enumerate(message_ids, start=1):
+            for attachment in client.iter_message_attachments(message_id):
+                result = store.save_attachment(attachment)
+                if result.saved:
+                    saved += 1
+                else:
+                    skipped += 1
+
+                files.append(
+                    {
+                        "filename": attachment.filename,
+                        "path": str(result.path),
+                        "saved": result.saved,
+                        "sha256": result.sha256,
+                        "contentType": attachment.content_type,
+                    }
+                )
+                pdf_payload = _pdf_payload(attachment, result.path)
+                if pdf_payload:
+                    pdf_files.append(pdf_payload)
+
+                _update_gmail_session(
+                    state,
+                    total_attachments=len(files),
+                    processed_attachments=len(files),
+                    saved=saved,
+                    skipped=skipped,
+                    files=list(files),
+                    pdf_files=list(pdf_files),
+                    message=(
+                        f"Processed {processed_messages}/{len(message_ids)} message(s), "
+                        f"{len(files)} attachment(s)."
+                    ),
+                )
+
+            _update_gmail_session(
+                state,
+                processed_messages=processed_messages,
+                total_attachments=len(files),
+                processed_attachments=len(files),
+                saved=saved,
+                skipped=skipped,
+                message=(
+                    f"Processed {processed_messages}/{len(message_ids)} message(s), "
+                    f"{len(files)} attachment(s)."
+                ),
+            )
 
         _update_gmail_session(
             state,
             status="done",
+            progress_phase="done",
+            processed_messages=len(message_ids),
+            total_messages=len(message_ids),
+            total_attachments=len(files),
+            processed_attachments=len(files),
             message=f"Done. Saved {saved}; skipped {skipped} duplicate(s).",
             saved=saved,
             skipped=skipped,
             files=files,
-            csv_files=csv_files,
+            pdf_files=pdf_files,
             error=None,
         )
     except Exception as exc:  # pragma: no cover - network/provider boundary
@@ -475,31 +802,30 @@ def _import_gmail_attachments(state: str, code: str) -> None:
         )
 
 
-def _csv_payload(attachment: Attachment, path: Path) -> dict[str, Any] | None:
+def _pdf_payload(attachment: Attachment, path: Path) -> dict[str, Any] | None:
     filename = attachment.filename.lower()
     content_type = (attachment.content_type or "").lower()
-    if not filename.endswith(".csv") and "csv" not in content_type:
+    if not filename.endswith(".pdf") and content_type != "application/pdf":
         return None
     if len(attachment.data) > 10 * 1024 * 1024:
         return {
             "filename": attachment.filename,
             "path": str(path),
-            "content": "",
+            "contentBase64": "",
+            "contentType": attachment.content_type or "application/pdf",
             "tooLarge": True,
+            "parseable": False,
+            "reason": "PDF report is too large to load automatically.",
         }
-
-    for encoding in ("utf-8-sig", "utf-16", "cp1250", "latin-1"):
-        try:
-            content = attachment.data.decode(encoding)
-            return {
-                "filename": attachment.filename,
-                "path": str(path),
-                "content": content,
-                "tooLarge": False,
-            }
-        except UnicodeDecodeError:
-            continue
-    return None
+    return {
+        "filename": attachment.filename,
+        "path": str(path),
+        "contentBase64": base64.b64encode(attachment.data).decode("ascii"),
+        "contentType": attachment.content_type,
+        "tooLarge": False,
+        "parseable": True,
+        "reason": "PDF report can be analyzed.",
+    }
 
 
 def _escape_html(value: str) -> str:
@@ -512,7 +838,7 @@ def _escape_html(value: str) -> str:
 
 
 def run_server(host: str, port: int) -> None:
-    server = ThreadingHTTPServer((host, port), Handler)
+    server = ReloadFriendlyHTTPServer((host, port), Handler)
     print(f"Invest Tax Calc running at http://{host}:{port}")
     try:
         server.serve_forever()
@@ -595,11 +921,13 @@ def main() -> None:
     parser = argparse.ArgumentParser(description="Run the local Invest Tax Calc app.")
     parser.add_argument("--host", default="127.0.0.1")
     parser.add_argument("--port", default=8765, type=int)
-    parser.add_argument("--reload", action="store_true", help="Restart the server when project files change.")
+    parser.add_argument("--reload", action="store_true", help="Restart the server when project files change. This is the default.")
+    parser.add_argument("--no-reload", action="store_true", help="Run one server process without watching files.")
     parser.add_argument("--reload-interval", default=0.8, type=float, help="Hot-reload polling interval in seconds.")
     args = parser.parse_args()
 
-    if args.reload and os.getenv("INVEST_TAX_CALC_RELOAD_CHILD") != "1":
+    reload_enabled = not args.no_reload or args.reload
+    if reload_enabled and os.getenv("INVEST_TAX_CALC_RELOAD_CHILD") != "1":
         run_reloader(args)
         return
 

@@ -16,8 +16,8 @@ def main(argv: list[str] | None = None) -> int:
     _add_common_args(parser)
     parser.add_argument(
         "--query",
-        default="from:trading212 has:attachment",
-        help="Gmail search query. Defaults to Trading 212 messages with attachments.",
+        default="from:trading212 has:attachment filename:pdf",
+        help="Gmail search query. Defaults to Trading 212 messages with PDF attachments.",
     )
 
     args = parser.parse_args(argv)
@@ -76,7 +76,7 @@ def _add_common_args(parser: argparse.ArgumentParser) -> None:
     parser.add_argument(
         "--max-messages",
         type=int,
-        default=200,
+        default=500,
         help="Maximum matching messages to inspect.",
     )
     parser.add_argument(
