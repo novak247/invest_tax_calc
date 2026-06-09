@@ -11,6 +11,7 @@ from invest_tax_calc.prices import (
     PriceProvider,
     PriceQuote,
     YahooPriceProvider,
+    fetch_fx_rates,
     quote_instruments,
 )
 
@@ -315,6 +316,66 @@ class YahooProviderTest(unittest.TestCase):
 
         self.assertEqual(quotes, {})
         self.assertTrue(any("Could not map" in warning for warning in warnings))
+
+
+class FetchFxRatesTest(unittest.TestCase):
+    def test_rates_are_fetched_and_cached(self) -> None:
+        provider = FakeProvider({}, fx={"USD": Decimal("23.5"), "EUR": Decimal("24.9")})
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "cache.json"
+            rates, warnings = fetch_fx_rates(
+                ["USD", "EUR"], provider=provider, cache=PriceCache(path)
+            )
+            self.assertEqual(rates, {"USD": Decimal("23.5"), "EUR": Decimal("24.9")})
+            self.assertEqual(warnings, [])
+            self.assertEqual(provider.fx_calls, 1)
+
+            rates, _ = fetch_fx_rates(["USD", "EUR"], provider=provider, cache=PriceCache(path))
+            self.assertEqual(rates, {"USD": Decimal("23.5"), "EUR": Decimal("24.9")})
+            self.assertEqual(provider.fx_calls, 1)
+
+    def test_force_refresh_skips_cache(self) -> None:
+        provider = FakeProvider({}, fx={"USD": Decimal("23.5")})
+        with tempfile.TemporaryDirectory() as tmp:
+            cache = PriceCache(Path(tmp) / "cache.json")
+            fetch_fx_rates(["USD"], provider=provider, cache=cache)
+            fetch_fx_rates(["USD"], provider=provider, cache=cache, force_refresh=True)
+        self.assertEqual(provider.fx_calls, 2)
+
+    def test_unknown_currency_warns(self) -> None:
+        provider = FakeProvider({}, fx={"USD": Decimal("23.5")})
+        rates, warnings = fetch_fx_rates(["USD", "XXX"], provider=provider)
+
+        self.assertEqual(rates, {"USD": Decimal("23.5")})
+        self.assertTrue(any("XXX" in warning for warning in warnings))
+
+
+class FxRatesEndpointTest(unittest.TestCase):
+    def test_handle_fx_rates_returns_requested_currencies(self) -> None:
+        import app
+
+        provider = FakeProvider({}, fx={"USD": Decimal("23.5"), "EUR": Decimal("24.9")})
+        with tempfile.TemporaryDirectory() as tmp:
+            cache = PriceCache(Path(tmp) / "cache.json")
+            result = app.handle_fx_rates(
+                {"currencies": ["usd", "EUR", "CZK", "USD"]}, provider=provider, cache=cache
+            )
+
+        self.assertEqual(result["rates"], {"USD": "23.5", "EUR": "24.9"})
+        self.assertEqual(result["warnings"], [])
+
+    def test_handle_fx_rates_defaults_to_major_currencies(self) -> None:
+        import app
+
+        provider = FakeProvider(
+            {},
+            fx={"USD": Decimal("23.5"), "EUR": Decimal("24.9"), "GBP": Decimal("29.1")},
+        )
+        with tempfile.TemporaryDirectory() as tmp:
+            cache = PriceCache(Path(tmp) / "cache.json")
+            result = app.handle_fx_rates({}, provider=provider, cache=cache)
+
+        self.assertEqual(result["rates"], {"USD": "23.5", "EUR": "24.9", "GBP": "29.1"})
 
 
 class PriceQuoteEndpointTest(unittest.TestCase):

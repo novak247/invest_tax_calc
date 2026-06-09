@@ -74,7 +74,44 @@ $("gmailFetchBtn").addEventListener("click", startGmailImport);
 $("gmailCancelBtn").addEventListener("click", cancelGmailImport);
 $("gmailSetupBtn").addEventListener("click", saveGmailConfig);
 loadGmailConfig();
+loadFxRates();
 watchDevReload();
+
+async function loadFxRates() {
+  // Replace the placeholder FX values with real fetched rates on startup.
+  const currencies = $("rates")
+    .value.split("\n")
+    .map((line) => line.split("=")[0].trim().toUpperCase())
+    .filter(Boolean);
+  try {
+    const result = await postJson("/api/fx/rates", { currencies });
+    applyFetchedFxRates(result.rates);
+  } catch (error) {
+    console.warn(`FX rate fetch failed, keeping defaults: ${error.message}`);
+  }
+}
+
+function applyFetchedFxRates(fxRates) {
+  const entries = Object.entries(fxRates || {});
+  if (!entries.length) return;
+  const order = [];
+  const table = {};
+  $("rates")
+    .value.split("\n")
+    .forEach((line) => {
+      const [currency, value] = line.split("=");
+      const key = (currency || "").trim().toUpperCase();
+      if (!key) return;
+      if (!(key in table)) order.push(key);
+      table[key] = (value || "").trim();
+    });
+  for (const [currency, rate] of entries) {
+    const key = currency.toUpperCase();
+    if (!(key in table)) order.push(key);
+    table[key] = Number(rate).toFixed(3);
+  }
+  $("rates").value = order.map((currency) => `${currency}=${table[currency]}`).join("\n");
+}
 
 async function analyze() {
   if (!state.content && !state.reports.length) {
@@ -597,6 +634,7 @@ async function refreshPrices(busyId) {
       forceRefresh: true,
     });
     state.quotes = result.quotes || {};
+    applyFetchedFxRates(result.fxRates);
     renderMultiRows();
     renderTargetInstruments();
     updateSinglePriceMeta();
@@ -637,6 +675,7 @@ async function fetchSinglePrice() {
       forceRefresh: true,
     });
     state.quotes = { ...state.quotes, ...(result.quotes || {}) };
+    applyFetchedFxRates(result.fxRates);
     const quote = state.quotes[key];
     if (quote?.priceCzk) {
       $("planPrice").value = roundCzk(quote.priceCzk);

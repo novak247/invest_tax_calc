@@ -40,6 +40,7 @@ from invest_tax_calc.prices import (
     PriceCache,
     PriceProvider,
     YahooPriceProvider,
+    fetch_fx_rates,
     quote_instruments,
 )
 from invest_tax_calc.t212_pdf import parse_trading212_pdf_job
@@ -476,6 +477,12 @@ class Handler(BaseHTTPRequestHandler):
             if self.path == "/api/prices/quote":
                 payload = self._read_json()
                 result = handle_price_quote(payload)
+                self._send_json(result)
+                return
+
+            if self.path == "/api/fx/rates":
+                payload = self._read_json()
+                result = handle_fx_rates(payload)
                 self._send_json(result)
                 return
 
@@ -933,6 +940,37 @@ def handle_price_quote(
         force_refresh=bool(payload.get("forceRefresh")),
     )
     return {"quotes": quotes, "warnings": warnings, "fxRates": fx_rates}
+
+
+FX_DEFAULT_CURRENCIES = ["USD", "EUR", "GBP"]
+
+
+def handle_fx_rates(
+    payload: dict[str, Any],
+    *,
+    provider: PriceProvider | None = None,
+    cache: PriceCache | None = None,
+) -> dict[str, Any]:
+    raw = payload.get("currencies")
+    currencies: list[str] = []
+    if isinstance(raw, list):
+        for item in raw:
+            currency = str(item or "").strip().upper()
+            if currency and currency != "CZK" and currency not in currencies:
+                currencies.append(currency)
+    if not currencies:
+        currencies = list(FX_DEFAULT_CURRENCIES)
+
+    rates, warnings = fetch_fx_rates(
+        currencies,
+        provider=provider or PRICE_PROVIDER,
+        cache=cache if cache is not None else PriceCache(PRICE_CACHE_PATH),
+        force_refresh=bool(payload.get("forceRefresh")),
+    )
+    return {
+        "rates": {currency: str(rate) for currency, rate in rates.items()},
+        "warnings": warnings,
+    }
 
 
 def _get_gmail_session(state: str) -> GmailImportSession:

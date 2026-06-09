@@ -385,6 +385,36 @@ class PriceCache:
         }
 
 
+def fetch_fx_rates(
+    currencies: list[str],
+    *,
+    provider: PriceProvider,
+    cache: PriceCache | None = None,
+    force_refresh: bool = False,
+) -> tuple[dict[str, Decimal], list[str]]:
+    """Resolve CZK rates for ``currencies``, serving fresh cache entries first."""
+    rates: dict[str, Decimal] = {}
+    warnings: list[str] = []
+    missing: list[str] = []
+    for currency in currencies:
+        cached = None
+        if cache is not None and not force_refresh:
+            cached = cache.get_fx(provider.name, currency)
+        if cached is not None:
+            rates[currency] = cached
+        else:
+            missing.append(currency)
+    if missing:
+        fetched, fetch_warnings = provider.fx_to_czk(missing)
+        warnings.extend(fetch_warnings)
+        rates.update(fetched)
+        if cache is not None and fetched:
+            for currency, rate in fetched.items():
+                cache.set_fx(provider.name, currency, rate)
+            cache.save()
+    return rates, warnings
+
+
 def quote_instruments(
     instruments: list[InstrumentRef],
     *,
@@ -423,29 +453,15 @@ def quote_instruments(
                 cache.save()
 
     effective_rates = dict(rates)
-    fetched_fx: dict[str, Decimal] = {}
     needed_currencies = sorted(
         {_normalize_currency(q.price, q.currency)[1] for q in quotes.values()}
         - {"CZK"}
         - set(effective_rates)
     )
-    missing_fx: list[str] = []
-    for currency in needed_currencies:
-        cached_rate = None
-        if cache is not None and not force_refresh:
-            cached_rate = cache.get_fx(provider.name, currency)
-        if cached_rate is not None:
-            fetched_fx[currency] = cached_rate
-        else:
-            missing_fx.append(currency)
-    if missing_fx:
-        fx_rates, fx_warnings = provider.fx_to_czk(missing_fx)
-        warnings.extend(fx_warnings)
-        fetched_fx.update(fx_rates)
-        if cache is not None and fx_rates:
-            for currency, rate in fx_rates.items():
-                cache.set_fx(provider.name, currency, rate)
-            cache.save()
+    fetched_fx, fx_warnings = fetch_fx_rates(
+        needed_currencies, provider=provider, cache=cache, force_refresh=force_refresh
+    )
+    warnings.extend(fx_warnings)
     effective_rates.update(fetched_fx)
 
     payload: dict[str, dict[str, Any]] = {}
