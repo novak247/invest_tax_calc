@@ -261,6 +261,49 @@ class YahooProviderTest(unittest.TestCase):
         self.assertTrue(any("XXX" in warning for warning in warnings))
         self.assertFalse(any("MXN" in warning for warning in warnings))
 
+    def test_prefers_primary_listing_over_regional_cross_listing(self) -> None:
+        tsm = InstrumentRef("ISIN:US8740391003", ticker="TSM", isin="US8740391003")
+
+        def chart(price: float, currency: str) -> dict:
+            return {
+                "chart": {
+                    "result": [
+                        {
+                            "meta": {
+                                "regularMarketPrice": price,
+                                "currency": currency,
+                                "regularMarketTime": 1765000000,
+                                "marketState": "REGULAR",
+                            }
+                        }
+                    ]
+                }
+            }
+
+        def fetch_json(url: str) -> dict:
+            if "finance/search" in url:
+                # Yahoo lists the Mexican cross-listing before the NYSE ADR.
+                return {
+                    "quotes": [
+                        {"symbol": "TSM.MX", "exchange": "MEX", "exchDisp": "Mexico"},
+                        {"symbol": "TSM", "exchange": "NYQ", "exchDisp": "NYSE"},
+                    ]
+                }
+            if "finance/chart/TSM.MX" in url:
+                return chart(3900.0, "MXN")
+            if "finance/chart/TSM?" in url:
+                return chart(210.5, "USD")
+            raise AssertionError(f"Unexpected URL: {url}")
+
+        provider = YahooPriceProvider(fetch_json=fetch_json)
+        quotes, warnings = provider.quote_many([tsm])
+
+        self.assertEqual(warnings, [])
+        result = quotes[tsm.instrument_key]
+        self.assertEqual(result.symbol, "TSM")
+        self.assertEqual(result.currency, "USD")
+        self.assertEqual(result.price, Decimal("210.5"))
+
     def test_unresolvable_symbol_warns(self) -> None:
         def fetch_json(url: str) -> dict:
             if "finance/search" in url:

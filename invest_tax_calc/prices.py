@@ -12,6 +12,21 @@ from typing import Any, Callable
 
 PRICE_CACHE_VERSION = "price_cache_v1"
 DEFAULT_PRICE_TTL_SECONDS = 600
+# Yahoo exchange codes for primary venues (US + major European). Search results
+# on these are preferred over regional cross-listings like .MX or .SG.
+_MAJOR_EXCHANGES = {
+    "NMS",  # Nasdaq
+    "NYQ",  # NYSE
+    "NGM",  # Nasdaq Global Market
+    "NCM",  # Nasdaq Capital Market
+    "ASE",  # NYSE American
+    "PCX",  # NYSE Arca
+    "LSE",  # London
+    "GER",  # Xetra
+    "PAR",  # Euronext Paris
+    "AMS",  # Euronext Amsterdam
+    "EBS",  # SIX Swiss
+}
 _HTTP_TIMEOUT_SECONDS = 12
 _USER_AGENT = "Mozilla/5.0 (compatible; InvestTaxCalc/0.1; local personal use)"
 
@@ -161,7 +176,7 @@ class YahooPriceProvider(PriceProvider):
         cached = self._symbol_cache.get(instrument.instrument_key)
         symbols: list[str] = [cached] if cached else []
         if instrument.isin:
-            symbols.extend(self._search_symbols(instrument.isin))
+            symbols.extend(self._search_symbols(instrument.isin, ticker=instrument.ticker))
         if instrument.ticker:
             symbols.append(instrument.ticker)
         seen: set[str] = set()
@@ -172,7 +187,7 @@ class YahooPriceProvider(PriceProvider):
                 ordered.append(symbol)
         return ordered
 
-    def _search_symbols(self, isin: str) -> list[str]:
+    def _search_symbols(self, isin: str, ticker: str = "") -> list[str]:
         url = (
             "https://query2.finance.yahoo.com/v1/finance/search?"
             + urllib.parse.urlencode({"q": isin, "quotesCount": 6, "newsCount": 0})
@@ -184,7 +199,8 @@ class YahooPriceProvider(PriceProvider):
         results = data.get("quotes")
         if not isinstance(results, list):
             return []
-        return [str(item.get("symbol")) for item in results if isinstance(item, dict) and item.get("symbol")]
+        items = [item for item in results if isinstance(item, dict) and item.get("symbol")]
+        return [str(item.get("symbol")) for item in _rank_search_results(items, ticker)]
 
     def fx_to_czk(self, currencies: list[str]) -> tuple[dict[str, Decimal], list[str]]:
         rates: dict[str, Decimal] = {}
@@ -232,6 +248,26 @@ class YahooPriceProvider(PriceProvider):
             return None
         meta = results[0].get("meta") if isinstance(results[0], dict) else None
         return meta if isinstance(meta, dict) else None
+
+
+def _rank_search_results(items: list[dict[str, Any]], ticker: str) -> list[dict[str, Any]]:
+    """Order Yahoo search hits so the primary listing is tried first.
+
+    Yahoo returns cross-listings in arbitrary order (e.g. TSM resolves to the
+    MXN-quoted TSM.MX before the NYSE ADR). Prefer an exact ticker match, then
+    major exchanges, keeping Yahoo's order as the tiebreak.
+    """
+    wanted = ticker.strip().upper()
+
+    def rank(indexed: tuple[int, dict[str, Any]]) -> tuple[int, int, int]:
+        index, item = indexed
+        symbol = str(item.get("symbol") or "").strip().upper()
+        exchange = str(item.get("exchange") or "").strip().upper()
+        ticker_match = 0 if wanted and symbol == wanted else 1
+        exchange_rank = 0 if exchange in _MAJOR_EXCHANGES else 1
+        return (ticker_match, exchange_rank, index)
+
+    return [item for _, item in sorted(enumerate(items), key=rank)]
 
 
 def _yahoo_price(raw_price: Any, currency: str) -> tuple[Decimal, str]:
