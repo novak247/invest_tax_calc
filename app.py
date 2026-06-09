@@ -34,8 +34,20 @@ from invest_tax_calc.email_import.providers import Attachment, GmailClient
 from invest_tax_calc.email_import.scopes import GMAIL_READONLY_SCOPE
 from invest_tax_calc.email_import.storage import AttachmentStore, ImportLedger
 from invest_tax_calc.models import Money, Trade
+from invest_tax_calc.prices import (
+    InstrumentRef,
+    PriceCache,
+    UnconfiguredPriceProvider,
+    quote_instruments,
+)
 from invest_tax_calc.t212_pdf import parse_trading212_pdf_job
-from invest_tax_calc.tax import analyze_transactions, parse_rate_table, plan_sale
+from invest_tax_calc.tax import (
+    analyze_transactions,
+    parse_rate_table,
+    plan_batch,
+    plan_sale,
+    plan_target_proceeds,
+)
 
 
 class ReloadFriendlyHTTPServer(ThreadingHTTPServer):
@@ -51,6 +63,7 @@ APP_DATA_DIR = ROOT / ".invest_tax_calc"
 GMAIL_CONFIG_PATH = APP_DATA_DIR / "gmail_oauth_client.json"
 GMAIL_TOKEN_PATH = APP_DATA_DIR / "gmail_token.json"
 PDF_PARSE_CACHE_DIR = APP_DATA_DIR / "parsed_pdf_cache"
+PRICE_CACHE_PATH = APP_DATA_DIR / "price_cache.json"
 PDF_PARSE_CACHE_VERSION = "trading212_pdf_v1"
 DEV_RELOAD_TOKEN = f"{os.getpid()}:{time.time_ns()}"
 # Bundling a full history of Trading 212 PDF statements (hundreds of distinct
@@ -60,6 +73,8 @@ GMAIL_FETCH_WORKERS = 8
 PDF_PARSE_WORKERS = max(1, min(4, os.cpu_count() or 1))
 GMAIL_IMPORT_LOCK = threading.Lock()
 GMAIL_IMPORTS: dict[str, "GmailImportSession"] = {}
+PRICE_PROVIDER = UnconfiguredPriceProvider()
+PRICE_CACHE = PriceCache(PRICE_CACHE_PATH)
 WATCH_SUFFIXES = {".py", ".html", ".css", ".js", ".toml"}
 WATCH_SKIP_DIRS = {
     ".git",
@@ -434,6 +449,8 @@ class Handler(BaseHTTPRequestHandler):
             self._send_json({"error": "Not found"}, status=404)
         except AppError as exc:
             self._send_json({"error": str(exc)}, status=exc.status)
+        except ValueError as exc:
+            self._send_json({"error": str(exc)}, status=400)
         except Exception as exc:  # pragma: no cover - defensive server boundary
             self._send_json({"error": f"Unexpected error: {exc}"}, status=500)
 
@@ -448,6 +465,24 @@ class Handler(BaseHTTPRequestHandler):
             if self.path == "/api/plan":
                 payload = self._read_json()
                 result = self._handle_plan(payload)
+                self._send_json(result)
+                return
+
+            if self.path == "/api/plan/batch":
+                payload = self._read_json()
+                result = self._handle_plan_batch(payload)
+                self._send_json(result)
+                return
+
+            if self.path == "/api/plan/target-proceeds":
+                payload = self._read_json()
+                result = self._handle_plan_target(payload)
+                self._send_json(result)
+                return
+
+            if self.path == "/api/prices/quote":
+                payload = self._read_json()
+                result = self._handle_price_quotes(payload)
                 self._send_json(result)
                 return
 
@@ -478,6 +513,8 @@ class Handler(BaseHTTPRequestHandler):
             self._send_json({"error": "Not found"}, status=404)
         except AppError as exc:
             self._send_json({"error": str(exc)}, status=exc.status)
+        except ValueError as exc:
+            self._send_json({"error": str(exc)}, status=400)
         except Exception as exc:  # pragma: no cover - defensive server boundary
             self._send_json({"error": f"Unexpected error: {exc}"}, status=500)
 
@@ -515,6 +552,58 @@ class Handler(BaseHTTPRequestHandler):
             price_per_share_czk=str(payload.get("pricePerShareCzk") or ""),
             sale_date=str(payload.get("saleDate") or ""),
         )
+
+    def _handle_plan_batch(self, payload: dict[str, Any]) -> dict[str, Any]:
+        rates = parse_rate_table(str(payload.get("rates") or ""))
+        transactions = self._parse_report_transactions(payload)
+        rows = payload.get("rows")
+        if not isinstance(rows, list):
+            raise AppError("Planned sale rows must be a list.")
+        return plan_batch(
+            transactions,
+            rates=rates,
+            rows=rows,
+            sale_date=str(payload.get("saleDate") or ""),
+        )
+
+    def _handle_plan_target(self, payload: dict[str, Any]) -> dict[str, Any]:
+        rates = parse_rate_table(str(payload.get("rates") or ""))
+        transactions = self._parse_report_transactions(payload)
+        candidate_keys = payload.get("candidateInstrumentKeys")
+        if candidate_keys is not None and not isinstance(candidate_keys, list):
+            raise AppError("Candidate instrument keys must be a list.")
+        quotes = payload.get("quotes")
+        if not isinstance(quotes, dict):
+            raise AppError("Optimizer quotes must be an object.")
+        return plan_target_proceeds(
+            transactions,
+            rates=rates,
+            target_proceeds_czk=str(payload.get("targetProceedsCzk") or ""),
+            sale_date=str(payload.get("saleDate") or ""),
+            optimization_mode=str(payload.get("optimizationMode") or "min_tax"),
+            candidate_instrument_keys=candidate_keys,
+            quotes=quotes,
+        )
+
+    def _handle_price_quotes(self, payload: dict[str, Any]) -> dict[str, Any]:
+        instruments = payload.get("instruments")
+        if not isinstance(instruments, list):
+            raise AppError("Price quote instruments must be a list.")
+        refs: list[InstrumentRef] = []
+        for index, instrument in enumerate(instruments, start=1):
+            if not isinstance(instrument, dict):
+                raise AppError(f"Price quote instrument {index} must be an object.")
+            instrument_key = str(instrument.get("instrumentKey") or "")
+            if not instrument_key:
+                raise AppError(f"Price quote instrument {index} needs an instrument key.")
+            refs.append(
+                InstrumentRef(
+                    instrument_key=instrument_key,
+                    ticker=str(instrument.get("ticker") or ""),
+                    isin=str(instrument.get("isin") or ""),
+                )
+            )
+        return quote_instruments(refs, provider=PRICE_PROVIDER, cache=PRICE_CACHE)
 
     def _parse_report_transactions(self, payload: dict[str, Any]) -> list:
         jobs = self._pdf_report_jobs(payload)

@@ -1,6 +1,16 @@
 # Future Sell Planner Design
 
-Status: design only, not implemented.
+Status: initial implementation on `codex/future-sell-planner`.
+
+Implemented in this branch:
+
+- combined multi-instrument planning,
+- fixed-proceeds optimization with FIFO-compatible lot selection,
+- compact lot grouping and scenario delta reporting,
+- explicit cached price-provider interface and manual fallback,
+- Single sale, Multi-sale, and Target amount UI modes.
+
+The concrete external market price provider remains intentionally unselected.
 
 This document captures future planner features for selling stocks/ETFs more intelligently:
 

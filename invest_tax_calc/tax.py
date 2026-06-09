@@ -156,10 +156,429 @@ def plan_sale(
     }
 
 
+def plan_batch(
+    transactions: list[Trade],
+    *,
+    rates: dict[str, Decimal],
+    rows: list[dict[str, Any]],
+    sale_date: str,
+) -> dict[str, Any]:
+    if not rows:
+        raise ValueError("Add at least one planned sale row.")
+
+    planned_date = _parse_date(sale_date or date.today().isoformat())
+    baseline = analyze_transactions(
+        transactions,
+        rates=rates,
+        tax_year=planned_date.year,
+        as_of=planned_date,
+    )
+    if not baseline:
+        raise ValueError("Analyze at least one transaction before planning sales.")
+
+    holdings_by_key = {
+        str(holding["instrumentKey"]): holding
+        for holding in baseline.get("holdings", [])
+    }
+    planned_trades: list[Trade] = []
+    planned_inputs: list[dict[str, Any]] = []
+    quantities_by_key: dict[str, Decimal] = defaultdict(Decimal)
+
+    for index, row in enumerate(rows, start=1):
+        if not isinstance(row, dict):
+            raise ValueError("Planned sale rows must be objects.")
+        instrument_key = str(row.get("instrumentKey") or "")
+        if not instrument_key:
+            raise ValueError(f"Choose an instrument for planned sale row {index}.")
+        holding = holdings_by_key.get(instrument_key)
+        if holding is None:
+            raise ValueError(f"No open holding was found for {instrument_key}.")
+
+        quantity = _parse_decimal(str(row.get("quantity") or ""), f"quantity in row {index}")
+        price = _parse_decimal(
+            str(row.get("pricePerShareCzk") or ""),
+            f"CZK price per share in row {index}",
+        )
+        if quantity <= 0:
+            raise ValueError(f"Quantity in row {index} must be greater than zero.")
+        if price <= 0:
+            raise ValueError(f"CZK price per share in row {index} must be greater than zero.")
+
+        quantities_by_key[instrument_key] += quantity
+        available = Decimal(str(holding.get("quantity") or "0"))
+        if quantities_by_key[instrument_key] > available + Decimal("0.00000001"):
+            raise ValueError(
+                f"Planned quantity for {holding.get('ticker') or instrument_key} exceeds "
+                f"the open holding of {_qty(available)}."
+            )
+
+        source_id = f"{PLANNED_SALE_ID}:{index:04d}"
+        planned_trades.append(
+            Trade(
+                source="Planner",
+                source_id=source_id,
+                action="Planned sale",
+                kind="sell",
+                traded_at=datetime.combine(planned_date, time(hour=12)),
+                instrument_key=instrument_key,
+                ticker=str(holding.get("ticker") or ""),
+                isin=str(holding.get("isin") or ""),
+                name=str(holding.get("name") or ""),
+                quantity=quantity,
+                gross=Money(quantity * price, "CZK"),
+                fees=(),
+            )
+        )
+        planned_inputs.append(
+            {
+                "sourceId": source_id,
+                "instrumentKey": instrument_key,
+                "ticker": str(holding.get("ticker") or ""),
+                "isin": str(holding.get("isin") or ""),
+                "name": str(holding.get("name") or ""),
+                "quantity": quantity,
+                "pricePerShareCzk": price,
+                "priceSource": str(row.get("priceSource") or "manual"),
+                "reasonSelected": str(row.get("reasonSelected") or ""),
+            }
+        )
+
+    after = analyze_transactions(
+        transactions + planned_trades,
+        rates=rates,
+        tax_year=planned_date.year,
+        as_of=planned_date,
+    )
+    planned_source_ids = {row["sourceId"] for row in planned_inputs}
+    planned_matches = [
+        match
+        for match in after.get("matches", [])
+        if match.get("saleSourceId") in planned_source_ids
+    ]
+    after_holdings = {
+        str(holding["instrumentKey"]): holding
+        for holding in after.get("holdings", [])
+    }
+    result_rows = [
+        _planned_row_payload(
+            row,
+            [
+                match
+                for match in planned_matches
+                if match.get("saleSourceId") == row["sourceId"]
+            ],
+            after_holdings.get(row["instrumentKey"]),
+        )
+        for row in planned_inputs
+    ]
+
+    baseline_summary = baseline["summary"]
+    after_summary = after["summary"]
+    estimated_proceeds = sum(
+        (row["quantity"] * row["pricePerShareCzk"] for row in planned_inputs),
+        Decimal("0"),
+    )
+    taxable_gain_delta = (
+        Decimal(str(after_summary["taxableGainCzk"]))
+        - Decimal(str(baseline_summary["taxableGainCzk"]))
+    )
+    tax_delta = (
+        Decimal(str(after_summary["estimatedTax15Czk"]))
+        - Decimal(str(baseline_summary["estimatedTax15Czk"]))
+    )
+    warnings = list(after.get("warnings", []))
+    if baseline_summary["grossLimitApplies"] and not after_summary["grossLimitApplies"]:
+        warnings.append(
+            "This plan pushes annual gross proceeds above 100,000 CZK, so earlier "
+            "short-term sales in the same year may become taxable too."
+        )
+
+    return {
+        "saleDate": planned_date.isoformat(),
+        "targetProceedsCzk": None,
+        "estimatedProceedsCzk": _num(estimated_proceeds),
+        "shortfallCzk": 0.0,
+        "overageCzk": 0.0,
+        "taxableGainDeltaCzk": _num(taxable_gain_delta),
+        "estimatedTaxDelta15Czk": _num(tax_delta),
+        "deltaTaxableGainCzk": _num(taxable_gain_delta),
+        "deltaEstimatedTax15Czk": _num(tax_delta),
+        "totalGrossProceedsAfterPlanCzk": after_summary["grossProceedsCzk"],
+        "rows": result_rows,
+        "lotGroups": _planned_match_groups(planned_matches),
+        "plannedMatches": planned_matches,
+        "baselineSummary": baseline_summary,
+        "afterSummary": after_summary,
+        "warnings": warnings,
+    }
+
+
+def plan_target_proceeds(
+    transactions: list[Trade],
+    *,
+    rates: dict[str, Decimal],
+    target_proceeds_czk: str,
+    sale_date: str,
+    optimization_mode: str,
+    candidate_instrument_keys: list[str] | None,
+    quotes: dict[str, Any],
+) -> dict[str, Any]:
+    target = _parse_decimal(target_proceeds_czk, "target proceeds")
+    if target <= 0:
+        raise ValueError("Target proceeds must be greater than zero.")
+
+    planned_date = _parse_date(sale_date or date.today().isoformat())
+    baseline = analyze_transactions(
+        transactions,
+        rates=rates,
+        tax_year=planned_date.year,
+        as_of=planned_date,
+    )
+    if not baseline:
+        raise ValueError("Analyze at least one transaction before optimizing sales.")
+
+    valid_modes = {"min_tax", "min_gain", "preserve_tax_free", "fifo"}
+    requested_mode = optimization_mode if optimization_mode in valid_modes else "min_tax"
+    candidate_keys = {
+        str(key)
+        for key in (candidate_instrument_keys or [])
+        if str(key)
+    }
+    holdings = [
+        holding
+        for holding in baseline.get("holdings", [])
+        if not candidate_keys or str(holding.get("instrumentKey")) in candidate_keys
+    ]
+    if not holdings:
+        raise ValueError("Choose at least one open holding for the optimizer.")
+
+    prices: dict[str, Decimal] = {}
+    missing_prices: list[str] = []
+    for holding in holdings:
+        key = str(holding["instrumentKey"])
+        quote = quotes.get(key, {}) if isinstance(quotes, dict) else {}
+        raw_price = quote.get("pricePerShareCzk") if isinstance(quote, dict) else quote
+        try:
+            price = _parse_decimal(str(raw_price or ""), f"price for {key}")
+        except ValueError:
+            missing_prices.append(str(holding.get("ticker") or key))
+            continue
+        if price <= 0:
+            missing_prices.append(str(holding.get("ticker") or key))
+            continue
+        prices[key] = price
+    if missing_prices:
+        raise ValueError(
+            "Enter or fetch a CZK price for: " + ", ".join(sorted(missing_prices))
+        )
+
+    strategies = (
+        ["min_tax", "min_gain", "fifo"]
+        if requested_mode == "min_tax"
+        else [requested_mode]
+    )
+    evaluated: list[tuple[str, dict[str, Any], int, int]] = []
+    for strategy in strategies:
+        generated_rows, candidate_count, selected_count = _target_rows(
+            holdings,
+            prices,
+            target,
+            strategy,
+        )
+        if not generated_rows:
+            continue
+        scenario = plan_batch(
+            transactions,
+            rates=rates,
+            rows=generated_rows,
+            sale_date=planned_date.isoformat(),
+        )
+        achieved = Decimal(str(scenario["estimatedProceedsCzk"]))
+        scenario["targetProceedsCzk"] = _num(target)
+        scenario["shortfallCzk"] = _num(max(target - achieved, Decimal("0")))
+        scenario["overageCzk"] = _num(max(achieved - target, Decimal("0")))
+        evaluated.append((strategy, scenario, candidate_count, selected_count))
+
+    if not evaluated:
+        raise ValueError("The selected holdings do not have any quantity available to sell.")
+
+    strategy, result, candidate_count, selected_count = min(
+        evaluated,
+        key=lambda item: (
+            Decimal(str(item[1]["shortfallCzk"])),
+            Decimal(str(item[1]["estimatedTaxDelta15Czk"])),
+            Decimal(str(item[1]["taxableGainDeltaCzk"])),
+            Decimal(str(item[1]["overageCzk"])),
+        ),
+    )
+    target_reached = Decimal(str(result["shortfallCzk"])) <= Decimal("0.01")
+    if not target_reached:
+        result["warnings"].append(
+            "The selected holdings cannot fully reach the requested target proceeds."
+        )
+    result["optimizer"] = {
+        "mode": requested_mode,
+        "targetReached": target_reached,
+        "candidateCount": candidate_count,
+        "selectedLotCount": selected_count,
+        "strategy": strategy,
+        "evaluatedStrategies": [item[0] for item in evaluated],
+    }
+    return result
+
+
+def _target_rows(
+    holdings: list[dict[str, Any]],
+    prices: dict[str, Decimal],
+    target: Decimal,
+    mode: str,
+) -> tuple[list[dict[str, Any]], int, int]:
+    queues = {
+        str(holding["instrumentKey"]): list(holding.get("lots", []))
+        for holding in holdings
+    }
+    holding_by_key = {str(holding["instrumentKey"]): holding for holding in holdings}
+    indexes = {key: 0 for key in queues}
+    selected: dict[str, Decimal] = defaultdict(Decimal)
+    selected_lots: dict[str, list[dict[str, Any]]] = defaultdict(list)
+    remaining = target
+    candidate_count = sum(len(lots) for lots in queues.values())
+    selected_count = 0
+
+    while remaining > Decimal("0.00000001"):
+        available: list[tuple[tuple[Any, ...], str, dict[str, Any]]] = []
+        for key, lots in queues.items():
+            index = indexes[key]
+            if index >= len(lots):
+                continue
+            lot = lots[index]
+            available.append((_target_lot_score(lot, prices[key], mode, key), key, lot))
+        if not available:
+            break
+
+        _, key, lot = min(available, key=lambda item: item[0])
+        lot_quantity = Decimal(str(lot.get("quantity") or "0"))
+        price = prices[key]
+        quantity = min(lot_quantity, remaining / price)
+        if quantity <= 0:
+            indexes[key] += 1
+            continue
+
+        selected[key] += quantity
+        selected_lots[key].append(lot)
+        selected_count += 1
+        remaining -= quantity * price
+        if quantity >= lot_quantity - Decimal("0.00000001"):
+            indexes[key] += 1
+        else:
+            break
+
+    rows: list[dict[str, Any]] = []
+    for key, quantity in selected.items():
+        holding = holding_by_key[key]
+        lots = selected_lots[key]
+        exempt_count = sum(1 for lot in lots if lot.get("timeTestPassed"))
+        reason = _optimizer_reason(mode, exempt_count, len(lots))
+        rows.append(
+            {
+                "instrumentKey": key,
+                "quantity": str(quantity),
+                "pricePerShareCzk": str(prices[key]),
+                "priceSource": "mixed",
+                "reasonSelected": reason,
+                "_ticker": str(holding.get("ticker") or ""),
+            }
+        )
+    rows.sort(key=lambda row: (str(row.get("_ticker")), str(row["instrumentKey"])))
+    return rows, candidate_count, selected_count
+
+
+def _target_lot_score(
+    lot: dict[str, Any],
+    price: Decimal,
+    mode: str,
+    instrument_key: str,
+) -> tuple[Any, ...]:
+    quantity = Decimal(str(lot.get("quantity") or "0"))
+    cost = Decimal(str(lot.get("costCzk") or "0"))
+    proceeds = quantity * price
+    gain_ratio = (proceeds - cost) / proceeds if proceeds else Decimal("0")
+    time_test_passed = bool(lot.get("timeTestPassed"))
+    acquired_at = str(lot.get("acquiredAt") or "9999-12-31")
+    if mode == "fifo":
+        return (acquired_at, instrument_key)
+    if mode == "preserve_tax_free":
+        return (time_test_passed, gain_ratio, acquired_at, instrument_key)
+    if mode == "min_gain":
+        return (gain_ratio, not time_test_passed, acquired_at, instrument_key)
+    return (not time_test_passed, gain_ratio, acquired_at, instrument_key)
+
+
+def _optimizer_reason(mode: str, exempt_count: int, lot_count: int) -> str:
+    if mode == "preserve_tax_free":
+        return "Preserves 3-year-exempt lots where FIFO permits."
+    if mode == "fifo":
+        return "Uses the earliest available FIFO lots."
+    if mode == "min_gain":
+        return "Uses the lowest estimated gain-per-proceeds FIFO path."
+    if exempt_count == lot_count:
+        return "Uses lots already past the 3-year time test."
+    if exempt_count:
+        return "Uses exempt lots first, then the lowest-gain FIFO path."
+    return "Uses the lowest estimated tax-cost FIFO path."
+
+
+def _planned_row_payload(
+    row: dict[str, Any],
+    matches: list[dict[str, Any]],
+    remaining_holding: dict[str, Any] | None,
+) -> dict[str, Any]:
+    proceeds = row["quantity"] * row["pricePerShareCzk"]
+    taxable_gain = max(
+        sum(
+            (
+                Decimal(str(match.get("gainCzk") or "0"))
+                for match in matches
+                if match.get("taxable")
+            ),
+            Decimal("0"),
+        ),
+        Decimal("0"),
+    )
+    exempt_proceeds = sum(
+        (
+            Decimal(str(match.get("grossProceedsCzk") or "0"))
+            for match in matches
+            if not match.get("taxable")
+        ),
+        Decimal("0"),
+    )
+    statuses = list(dict.fromkeys(str(match.get("status") or "") for match in matches))
+    return {
+        "instrumentKey": row["instrumentKey"],
+        "ticker": row["ticker"],
+        "isin": row["isin"],
+        "name": row["name"],
+        "quantity": _qty(row["quantity"]),
+        "pricePerShareCzk": _num(row["pricePerShareCzk"]),
+        "priceSource": row["priceSource"],
+        "estimatedProceedsCzk": _num(proceeds),
+        "taxableGainCzk": _num(taxable_gain),
+        "estimatedTax15Czk": _num(taxable_gain * TAX_RATE_BASIC),
+        "exemptProceedsCzk": _num(exempt_proceeds),
+        "remainingQuantity": (
+            float(remaining_holding["quantity"]) if remaining_holding else 0.0
+        ),
+        "taxStatusSummary": "; ".join(statuses) or "No matched lots",
+        "reasonSelected": row["reasonSelected"],
+    }
+
+
 def _planned_match_groups(matches: list[dict[str, Any]]) -> list[dict[str, Any]]:
     ordered = sorted(
         matches,
         key=lambda match: (
+            match.get("instrumentKey") or "",
             match.get("buyDate") or "9999-12-31",
             match.get("status") or "",
             match.get("buySourceId") or "",
@@ -169,12 +588,20 @@ def _planned_match_groups(matches: list[dict[str, Any]]) -> list[dict[str, Any]]
     current: dict[str, Any] | None = None
 
     for match in ordered:
-        key = (bool(match.get("taxable")), str(match.get("status") or ""))
+        key = (
+            str(match.get("instrumentKey") or ""),
+            bool(match.get("taxable")),
+            str(match.get("status") or ""),
+        )
         if current is None or current["_key"] != key:
             current = {
                 "_key": key,
-                "taxable": key[0],
-                "status": key[1],
+                "instrumentKey": key[0],
+                "ticker": str(match.get("ticker") or ""),
+                "isin": str(match.get("isin") or ""),
+                "name": str(match.get("name") or ""),
+                "taxable": key[1],
+                "status": key[2],
                 "saleDate": match.get("saleDate"),
                 "buyDateStart": match.get("buyDate"),
                 "buyDateEnd": match.get("buyDate"),
@@ -205,6 +632,10 @@ def _planned_match_groups(matches: list[dict[str, Any]]) -> list[dict[str, Any]]
     for group in groups:
         payload.append(
             {
+                "instrumentKey": group["instrumentKey"],
+                "ticker": group["ticker"],
+                "isin": group["isin"],
+                "name": group["name"],
                 "taxable": bool(group["taxable"]),
                 "status": str(group["status"]),
                 "saleDate": group["saleDate"],

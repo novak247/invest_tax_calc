@@ -89,6 +89,32 @@
       .panel-heading button { width: auto; padding: 7px 14px; }
 
       .planner-grid { display: grid; grid-template-columns: repeat(4, 1fr); gap: 12px; padding: 14px; }
+      .planner-tabs { display: flex; gap: 1px; background: var(--grid); border-bottom: 1px solid var(--grid); }
+      .planner-tabs button { width: auto; flex: 1; border: 0; background: var(--bg); color: var(--dim); }
+      .planner-tabs button.active { background: var(--amber); color: #0a0a0a; }
+      .planner-pane { padding: 14px; }
+      .planner-pane .planner-grid { padding: 0; }
+      .planner-actions { display: flex; flex-wrap: wrap; justify-content: flex-end; gap: 8px; margin-top: 12px; }
+      .planner-actions button { width: auto; }
+      .planner-actions .secondary { background: transparent; color: var(--cyan); border: 1px solid var(--cyan); }
+      .planner-price-status { color: var(--dim); font-size: 11px; margin: 10px 14px 0; }
+      .planner-price-status.warn { color: var(--amber); }
+      .editable-plan { display: grid; gap: 8px; }
+      .editable-plan-row {
+        display: grid;
+        grid-template-columns: minmax(220px, 1.4fr) minmax(120px, 0.55fr) minmax(130px, 0.7fr) minmax(140px, 0.7fr) minmax(140px, 0.7fr) auto;
+        gap: 8px;
+        align-items: end;
+      }
+      .editable-plan-row label { margin: 0; }
+      .editable-plan-row button { width: auto; min-height: 35px; padding: 8px 12px; background: transparent; color: var(--red); border: 1px solid var(--red); }
+      .row-proceeds { color: var(--green); padding: 9px 4px; white-space: nowrap; }
+      .target-candidates { margin-top: 12px; overflow-x: auto; border: 1px solid var(--grid); }
+      .target-candidates input[type="checkbox"] { width: auto; margin: 0; }
+      .target-candidates input[type="number"] { min-width: 145px; margin: 0; }
+      .plan-sales-table { margin-top: 16px; overflow-x: auto; }
+      .plan-reason { color: var(--dim); font-size: 11px; }
+      .plan-warning-list { color: var(--amber); margin: 14px 0 0; padding-left: 20px; }
       .plan-result { border-top: 1px solid var(--grid); padding: 14px; }
       .plan-result-grid { display: grid; grid-template-columns: repeat(4, 1fr); gap: 12px; }
       .plan-result-grid span { color: var(--dim); font-size: 9.5px; text-transform: uppercase; display: block; }
@@ -180,6 +206,7 @@
         .console { border-right: none; border-bottom: 1px solid var(--grid); }
         .summary-strip { grid-template-columns: 1fr 1fr; }
         .planner-grid, .plan-result-grid { grid-template-columns: 1fr 1fr; }
+        .editable-plan-row { grid-template-columns: 1fr 1fr; border-bottom: 1px solid var(--grid); padding-bottom: 10px; }
       }
     </style>
   </head>
@@ -236,12 +263,44 @@ GBP=29.40</textarea></label>
             <section class="summary-strip" id="summaryStrip"></section>
 
             <section class="panel planner">
-              <div class="panel-heading"><div><p class="eyebrow">Sell planner</p><h2>SIMULATE_SALE</h2></div><button id="planBtn" type="button">▶ PLAN</button></div>
-              <div class="planner-grid">
-                <label>INSTRUMENT<select id="planInstrument"></select></label>
-                <label>QTY<input id="planQuantity" type="number" min="0" step="0.000001" /></label>
-                <label>PX/SHARE CZK<input id="planPrice" type="number" min="0" step="0.01" /></label>
-                <label>SALE_DATE<input id="planDate" type="date" /></label>
+              <div class="panel-heading"><div><p class="eyebrow">Sell planner</p><h2>PLAN_FUTURE_SALES</h2></div><button id="plannerRefreshBtn" type="button">REFRESH PRICES</button></div>
+              <div class="planner-tabs">
+                <button type="button" class="active" data-planner-mode="single">Single sale</button>
+                <button type="button" data-planner-mode="multi">Multi-sale</button>
+                <button type="button" data-planner-mode="target">Target amount</button>
+              </div>
+              <div id="plannerPriceStatus" class="planner-price-status">Prices stay local until you explicitly refresh them.</div>
+
+              <div id="singlePlannerPane" class="planner-pane">
+                <div class="planner-grid">
+                  <label>INSTRUMENT<select id="planInstrument"></select></label>
+                  <label>QTY<input id="planQuantity" type="number" min="0" step="0.000001" /></label>
+                  <label>PRICE SOURCE<select id="planPriceSource"><option value="manual">Manual</option><option value="fetch">Fetched / fallback</option></select></label>
+                  <label>PX/SHARE CZK<input id="planPrice" type="number" min="0" step="0.01" /></label>
+                  <label>SALE_DATE<input id="planDate" type="date" /></label>
+                </div>
+                <div class="planner-actions"><button id="planBtn" type="button">RUN SINGLE PLAN</button></div>
+              </div>
+
+              <div id="multiPlannerPane" class="planner-pane hidden">
+                <div id="multiPlanRows" class="editable-plan"></div>
+                <div class="planner-grid">
+                  <label>SALE_DATE<input id="multiPlanDate" type="date" /></label>
+                </div>
+                <div class="planner-actions">
+                  <button id="addPlanRowBtn" class="secondary" type="button">ADD ROW</button>
+                  <button id="multiPlanBtn" type="button">RUN MULTI PLAN</button>
+                </div>
+              </div>
+
+              <div id="targetPlannerPane" class="planner-pane hidden">
+                <div class="planner-grid">
+                  <label>TARGET PROCEEDS CZK<input id="targetProceeds" type="number" min="0" step="100" value="150000" /></label>
+                  <label>SALE_DATE<input id="targetPlanDate" type="date" /></label>
+                  <label>OPTIMIZATION<select id="targetMode"><option value="min_tax">Lowest estimated tax</option><option value="min_gain">Lowest taxable gain</option><option value="preserve_tax_free">Preserve tax-free lots</option><option value="fifo">Simple FIFO</option></select></label>
+                </div>
+                <div id="targetCandidates" class="target-candidates"></div>
+                <div class="planner-actions"><button id="targetPlanBtn" type="button">RUN OPTIMIZER</button></div>
               </div>
               <div id="planResult" class="plan-result hidden"></div>
             </section>
@@ -298,7 +357,7 @@ GBP=29.40</textarea></label>
       </aside>
     </div>
 
-    <script src="/static/app.js?v=planner-layout-2"></script>
+    <script src="/static/app.js?v=future-sell-planner-1"></script>
     <script>
       // Drive the terminal STATUS readout from the live work happening in app.js.
       //  - analyze (manual or Gmail-triggered): app.js disables #analyzeBtn

@@ -60,7 +60,19 @@ Year-specific entries such as `USD:2025` override a generic `USD` rate.
 - FIFO lot matching
 - Czech 100,000 CZK annual gross proceeds exemption
 - Czech 3-year time test
-- Sell planner based on current uploaded holdings
+- Single-sale and combined multi-instrument sell planning
+- Fixed-proceeds optimizer with explainable FIFO-compatible recommendations
+- Explicit price refresh boundary with manual CZK price fallback
+
+## Future Sell Planner
+
+After analyzing statements, the sell planner supports three modes:
+
+- `Single sale` evaluates one proposed sale.
+- `Multi-sale` evaluates several instruments together so the annual 100,000 CZK gross proceeds rule is applied globally.
+- `Target amount` recommends quantities to raise a requested CZK amount and compares multiple explainable strategies for the lowest estimated scenario tax.
+
+Price refresh is explicit and cached under `.invest_tax_calc/price_cache.json`. A market data adapter is intentionally not selected yet, so the default provider reports that it is unconfigured and the planner continues to accept manual CZK prices.
 
 ## Future Ideas
 
