@@ -89,6 +89,35 @@
       .panel-heading button { width: auto; padding: 7px 14px; }
 
       .planner-grid { display: grid; grid-template-columns: repeat(4, 1fr); gap: 12px; padding: 14px; }
+      .plan-tabs { display: flex; gap: 0; border: 1px solid var(--grid); }
+      .plan-tabs button { width: auto; background: transparent; color: var(--dim); border: none; border-right: 1px solid var(--grid); padding: 7px 14px; font-size: 10px; }
+      .plan-tabs button:last-child { border-right: none; }
+      .plan-tabs button:hover:not(:disabled) { background: var(--grid); color: var(--fg); }
+      .plan-tabs button.active { background: var(--amber); color: #0a0a0a; }
+      .plan-actions { display: flex; gap: 10px; padding: 0 14px 14px; }
+      .plan-actions button { width: auto; padding: 9px 16px; }
+      .ghost-button { background: transparent; color: var(--cyan); border: 1px solid var(--cyan); }
+      .ghost-button:hover:not(:disabled) { background: var(--cyan); color: #0a0a0a; }
+      .price-meta { padding: 0 14px 12px; font-size: 10.5px; color: var(--dim); }
+      .price-meta b { color: var(--cyan); font-weight: 500; }
+      .multi-table { padding: 14px 14px 4px; }
+      .multi-head, .multi-row { display: grid; grid-template-columns: minmax(160px, 1.4fr) 0.8fr 0.9fr 0.7fr minmax(120px, 1fr) 36px; gap: 10px; align-items: center; }
+      .multi-head { color: var(--dim); font-size: 9.5px; text-transform: uppercase; letter-spacing: 0.08em; padding-bottom: 6px; }
+      .multi-row { padding: 4px 0; }
+      .multi-row input, .multi-row select { margin-top: 0; }
+      .multi-row input[readonly] { color: var(--cyan); }
+      .multi-row .row-meta { color: var(--dim); font-size: 10px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+      .multi-row .row-meta.ok { color: var(--cyan); }
+      .multi-row .row-meta.warn { color: var(--amber); }
+      .multi-row button { padding: 7px 0; background: transparent; color: var(--red); border: 1px solid var(--grid); }
+      .multi-row button:hover:not(:disabled) { background: var(--red); color: #0a0a0a; }
+      .target-instruments { padding: 0 14px 12px; display: flex; flex-wrap: wrap; gap: 8px; }
+      .target-instruments label { display: inline-flex; align-items: center; gap: 6px; margin: 0; border: 1px solid var(--grid); padding: 6px 10px; cursor: pointer; text-transform: none; letter-spacing: 0; font-size: 11px; color: var(--fg); }
+      .target-instruments label.has-quote { border-color: var(--cyan); }
+      .target-instruments input { width: auto; margin: 0; }
+      .target-instruments small { color: var(--dim); }
+      .plan-summary-note { padding: 10px 0 0; color: var(--dim); font-size: 10.5px; }
+      .plan-rows-table { margin-top: 14px; border-top: 1px solid var(--grid); }
       .plan-result { border-top: 1px solid var(--grid); padding: 14px; }
       .plan-result-grid { display: grid; grid-template-columns: repeat(4, 1fr); gap: 12px; }
       .plan-result-grid span { color: var(--dim); font-size: 9.5px; text-transform: uppercase; display: block; }
@@ -236,14 +265,66 @@ GBP=29.40</textarea></label>
             <section class="summary-strip" id="summaryStrip"></section>
 
             <section class="panel planner">
-              <div class="panel-heading"><div><p class="eyebrow">Sell planner</p><h2>SIMULATE_SALE</h2></div><button id="planBtn" type="button">▶ PLAN</button></div>
-              <div class="planner-grid">
-                <label>INSTRUMENT<select id="planInstrument"></select></label>
-                <label>QTY<input id="planQuantity" type="number" min="0" step="0.000001" /></label>
-                <label>PX/SHARE CZK<input id="planPrice" type="number" min="0" step="0.01" /></label>
-                <label>SALE_DATE<input id="planDate" type="date" /></label>
+              <div class="panel-heading">
+                <div><p class="eyebrow">Sell planner</p><h2>SIMULATE_SALE</h2></div>
+                <div class="plan-tabs">
+                  <button type="button" class="active" data-plan-tab="single">SINGLE</button>
+                  <button type="button" data-plan-tab="multi">MULTI</button>
+                  <button type="button" data-plan-tab="target">TARGET</button>
+                </div>
               </div>
-              <div id="planResult" class="plan-result hidden"></div>
+
+              <div id="planTabSingle" class="plan-tab">
+                <div class="planner-grid">
+                  <label>INSTRUMENT<select id="planInstrument"></select></label>
+                  <label>QTY<input id="planQuantity" type="number" min="0" step="0.000001" /></label>
+                  <label>PX/SHARE CZK<input id="planPrice" type="number" min="0" step="0.01" /></label>
+                  <label>SALE_DATE<input id="planDate" type="date" /></label>
+                </div>
+                <div class="plan-actions">
+                  <button id="planFetchPriceBtn" type="button" class="ghost-button">↻ FETCH PX</button>
+                  <button id="planBtn" type="button">▶ PLAN</button>
+                </div>
+                <div id="planPriceMeta" class="price-meta hidden"></div>
+                <div id="planResult" class="plan-result hidden"></div>
+              </div>
+
+              <div id="planTabMulti" class="plan-tab hidden">
+                <div class="multi-table">
+                  <div class="multi-head"><span>Instrument</span><span>Qty</span><span>Px/share CZK</span><span>Source</span><span>Quote</span><span></span></div>
+                  <div id="multiRows"></div>
+                </div>
+                <div class="planner-grid" style="grid-template-columns: 1fr 3fr;">
+                  <label>SALE_DATE<input id="multiDate" type="date" /></label>
+                </div>
+                <div class="plan-actions">
+                  <button id="multiAddRowBtn" type="button" class="ghost-button">+ ADD ROW</button>
+                  <button id="multiRefreshBtn" type="button" class="ghost-button">↻ REFRESH PX</button>
+                  <button id="multiPlanBtn" type="button">▶ RUN PLAN</button>
+                </div>
+                <div id="multiPriceMeta" class="price-meta hidden"></div>
+                <div id="multiResult" class="plan-result hidden"></div>
+              </div>
+
+              <div id="planTabTarget" class="plan-tab hidden">
+                <div class="planner-grid" style="grid-template-columns: repeat(3, 1fr);">
+                  <label>TARGET CZK<input id="targetAmount" type="number" min="0" step="1" placeholder="150000" /></label>
+                  <label>SALE_DATE<input id="targetDate" type="date" /></label>
+                  <label>MODE<select id="targetMode">
+                    <option value="min_tax">Lowest estimated tax</option>
+                    <option value="min_taxable_gain">Lowest taxable gain</option>
+                    <option value="preserve_tax_free">Preserve tax-free lots</option>
+                    <option value="fifo">Simple FIFO</option>
+                  </select></label>
+                </div>
+                <div id="targetInstruments" class="target-instruments"></div>
+                <div class="plan-actions">
+                  <button id="targetRefreshBtn" type="button" class="ghost-button">↻ REFRESH PX</button>
+                  <button id="targetPlanBtn" type="button">▶ RUN OPTIMIZER</button>
+                </div>
+                <div id="targetPriceMeta" class="price-meta hidden"></div>
+                <div id="targetResult" class="plan-result hidden"></div>
+              </div>
             </section>
 
             <section class="panel">
@@ -298,7 +379,7 @@ GBP=29.40</textarea></label>
       </aside>
     </div>
 
-    <script src="/static/app.js?v=planner-layout-2"></script>
+    <script src="/static/app.js?v=planner-tabs-1"></script>
     <script>
       // Drive the terminal STATUS readout from the live work happening in app.js.
       //  - analyze (manual or Gmail-triggered): app.js disables #analyzeBtn

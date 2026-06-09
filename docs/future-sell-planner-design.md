@@ -1,6 +1,9 @@
 # Future Sell Planner Design
 
-Status: design only, not implemented.
+Status: implemented on the `feature/future-sell-planner` branch (planner modes,
+`/api/plan/batch`, `/api/plan/target-proceeds`, `/api/prices/quote` with a Yahoo
+provider and TTL cache). This document remains the design reference; see Open
+Questions for items intentionally deferred.
 
 This document captures future planner features for selling stocks/ETFs more intelligently:
 

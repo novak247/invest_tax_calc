@@ -11,6 +11,10 @@ const state = {
   gmailConfigured: false,
   gmailTokenCached: false,
   reloadToken: "",
+  holdings: [],
+  quotes: {},
+  multiRows: [],
+  multiRowSeq: 0,
 };
 
 const $ = (id) => document.getElementById(id);
@@ -18,6 +22,8 @@ const $ = (id) => document.getElementById(id);
 const today = new Date().toISOString().slice(0, 10);
 $("asOf").value = today;
 $("planDate").value = today;
+$("multiDate").value = today;
+$("targetDate").value = today;
 $("taxYear").value = new Date().getFullYear();
 
 $("pdfFile").addEventListener("change", async (event) => {
@@ -41,6 +47,28 @@ $("pdfFile").addEventListener("change", async (event) => {
 
 $("analyzeBtn").addEventListener("click", analyze);
 $("planBtn").addEventListener("click", runPlan);
+$("planFetchPriceBtn").addEventListener("click", fetchSinglePrice);
+$("planInstrument").addEventListener("change", updateSinglePriceMeta);
+$("multiAddRowBtn").addEventListener("click", () => {
+  addMultiRow();
+  renderMultiRows();
+});
+$("multiRefreshBtn").addEventListener("click", () => refreshPrices("multiRefreshBtn"));
+$("multiPlanBtn").addEventListener("click", runMultiPlan);
+$("targetRefreshBtn").addEventListener("click", () => refreshPrices("targetRefreshBtn"));
+$("targetPlanBtn").addEventListener("click", runTargetPlan);
+document.querySelectorAll("[data-plan-tab]").forEach((button) =>
+  button.addEventListener("click", () => switchPlanTab(button.dataset.planTab))
+);
+$("multiRows").addEventListener("input", syncMultiRow);
+$("multiRows").addEventListener("change", syncMultiRow);
+$("multiRows").addEventListener("click", (event) => {
+  const button = event.target.closest("button[data-remove]");
+  if (!button) return;
+  state.multiRows = state.multiRows.filter((row) => String(row.id) !== button.dataset.remove);
+  if (!state.multiRows.length) addMultiRow();
+  renderMultiRows();
+});
 $("gmailConnectBtn").addEventListener("click", connectGmail);
 $("gmailFetchBtn").addEventListener("click", startGmailImport);
 $("gmailCancelBtn").addEventListener("click", cancelGmailImport);
@@ -421,6 +449,7 @@ function renderWarnings(warnings) {
 }
 
 function setupPlanner(holdings) {
+  state.holdings = holdings || [];
   const select = $("planInstrument");
   select.innerHTML = holdings
     .map(
@@ -431,8 +460,416 @@ function setupPlanner(holdings) {
 
   if (holdings.length) {
     $("planQuantity").value = holdings[0].quantity;
-    $("planResult").classList.add("hidden");
   }
+
+  state.multiRows = [];
+  addMultiRow();
+  renderMultiRows();
+  renderTargetInstruments();
+  updateSinglePriceMeta();
+  ["planResult", "multiResult", "targetResult"].forEach((id) => $(id).classList.add("hidden"));
+}
+
+function switchPlanTab(tab) {
+  document
+    .querySelectorAll("[data-plan-tab]")
+    .forEach((button) => button.classList.toggle("active", button.dataset.planTab === tab));
+  $("planTabSingle").classList.toggle("hidden", tab !== "single");
+  $("planTabMulti").classList.toggle("hidden", tab !== "multi");
+  $("planTabTarget").classList.toggle("hidden", tab !== "target");
+}
+
+function addMultiRow() {
+  state.multiRowSeq += 1;
+  state.multiRows.push({
+    id: state.multiRowSeq,
+    instrumentKey: state.holdings[0]?.instrumentKey || "",
+    quantity: "",
+    price: "",
+    source: "fetch",
+  });
+}
+
+function renderMultiRows() {
+  const options = (selected) =>
+    state.holdings
+      .map(
+        (holding) =>
+          `<option value="${escapeHtml(holding.instrumentKey)}" ${
+            holding.instrumentKey === selected ? "selected" : ""
+          }>${instrumentLabel(holding)}</option>`
+      )
+      .join("");
+
+  $("multiRows").innerHTML = state.multiRows
+    .map((row) => {
+      const quote = row.source === "fetch" ? state.quotes[row.instrumentKey] : null;
+      const priceValue =
+        row.source === "fetch" ? (quote?.priceCzk ? roundCzk(quote.priceCzk) : "") : row.price;
+      let meta = "manual price";
+      let metaClass = "";
+      if (row.source === "fetch") {
+        if (quote?.priceCzk) {
+          meta = `${quote.provider} · ${formatAsOf(quote.asOf)}`;
+          metaClass = "ok";
+        } else {
+          meta = "no quote — refresh px or go manual";
+          metaClass = "warn";
+        }
+      }
+      return `
+        <div class="multi-row" data-row="${row.id}">
+          <select data-field="instrumentKey">${options(row.instrumentKey)}</select>
+          <input data-field="quantity" type="number" min="0" step="0.00000001" value="${escapeHtml(
+            String(row.quantity ?? "")
+          )}" />
+          <input data-field="price" type="number" min="0" step="0.01" value="${escapeHtml(
+            String(priceValue ?? "")
+          )}" ${row.source === "fetch" ? "readonly" : ""} />
+          <select data-field="source">
+            <option value="fetch" ${row.source === "fetch" ? "selected" : ""}>FETCH</option>
+            <option value="manual" ${row.source === "manual" ? "selected" : ""}>MANUAL</option>
+          </select>
+          <span class="row-meta ${metaClass}">${escapeHtml(meta)}</span>
+          <button type="button" data-remove="${row.id}" title="Remove row">×</button>
+        </div>
+      `;
+    })
+    .join("");
+}
+
+function syncMultiRow(event) {
+  const field = event.target.dataset?.field;
+  const rowEl = event.target.closest("[data-row]");
+  if (!field || !rowEl) return;
+  const row = state.multiRows.find((item) => String(item.id) === rowEl.dataset.row);
+  if (!row) return;
+  row[field] = event.target.value;
+  // Re-render only on structural changes; re-rendering on keystrokes would drop focus.
+  if (event.type === "change" && (field === "source" || field === "instrumentKey")) {
+    renderMultiRows();
+  }
+}
+
+function renderTargetInstruments() {
+  const existing = document.querySelectorAll("#targetInstruments input[data-target-key]");
+  const previous = existing.length
+    ? new Set(
+        [...existing].filter((input) => input.checked).map((input) => input.dataset.targetKey)
+      )
+    : null;
+
+  $("targetInstruments").innerHTML = state.holdings
+    .map((holding) => {
+      const quote = state.quotes[holding.instrumentKey];
+      const hasQuote = Boolean(quote?.priceCzk);
+      const checked = previous ? previous.has(holding.instrumentKey) : true;
+      const px = hasQuote ? czk(Number(quote.priceCzk)) : "no px";
+      return `
+        <label class="${hasQuote ? "has-quote" : ""}">
+          <input type="checkbox" data-target-key="${escapeHtml(holding.instrumentKey)}" ${
+        checked ? "checked" : ""
+      } />
+          <span>${instrumentLabel(holding)}</span>
+          <small>${escapeHtml(px)}</small>
+        </label>
+      `;
+    })
+    .join("");
+}
+
+async function refreshPrices(busyId) {
+  if (!state.holdings.length) {
+    showError("Analyze a report before fetching prices.");
+    return;
+  }
+
+  setBusy(busyId, true);
+  clearError();
+  try {
+    const result = await postJson("/api/prices/quote", {
+      instruments: state.holdings.map((holding) => ({
+        instrumentKey: holding.instrumentKey,
+        ticker: holding.ticker,
+        isin: holding.isin,
+      })),
+      rates: $("rates").value,
+      forceRefresh: true,
+    });
+    state.quotes = result.quotes || {};
+    renderMultiRows();
+    renderTargetInstruments();
+    updateSinglePriceMeta();
+
+    const count = Object.keys(state.quotes).length;
+    const warningText = (result.warnings || []).join(" · ");
+    ["multiPriceMeta", "targetPriceMeta"].forEach((id) => {
+      const el = $(id);
+      el.innerHTML = `<b>${count}</b> quote${count === 1 ? "" : "s"} fetched${
+        warningText ? ` · ${escapeHtml(warningText)}` : ""
+      }`;
+      el.classList.remove("hidden");
+    });
+  } catch (error) {
+    showError(error.message);
+  } finally {
+    setBusy(busyId, false);
+  }
+}
+
+async function fetchSinglePrice() {
+  const key = $("planInstrument").value;
+  const holding = state.holdings.find((item) => item.instrumentKey === key);
+  if (!holding) {
+    showError("Analyze a report and choose an instrument first.");
+    return;
+  }
+
+  setBusy("planFetchPriceBtn", true);
+  clearError();
+  try {
+    const result = await postJson("/api/prices/quote", {
+      instruments: [
+        { instrumentKey: holding.instrumentKey, ticker: holding.ticker, isin: holding.isin },
+      ],
+      rates: $("rates").value,
+      forceRefresh: true,
+    });
+    state.quotes = { ...state.quotes, ...(result.quotes || {}) };
+    const quote = state.quotes[key];
+    if (quote?.priceCzk) {
+      $("planPrice").value = roundCzk(quote.priceCzk);
+      updateSinglePriceMeta();
+    } else {
+      showError(
+        (result.warnings || []).join(" ") || "No quote available. Enter the price manually."
+      );
+    }
+  } catch (error) {
+    showError(error.message);
+  } finally {
+    setBusy("planFetchPriceBtn", false);
+  }
+}
+
+function updateSinglePriceMeta() {
+  const quote = state.quotes[$("planInstrument").value];
+  const el = $("planPriceMeta");
+  if (!quote?.priceCzk) {
+    el.classList.add("hidden");
+    return;
+  }
+  el.innerHTML = `PX <b>${escapeHtml(roundCzk(quote.priceCzk))} CZK</b> · ${escapeHtml(
+    quote.provider || ""
+  )}${quote.symbol ? ` (${escapeHtml(quote.symbol)})` : ""} · as of <b>${escapeHtml(
+    formatAsOf(quote.asOf)
+  )}</b>`;
+  el.classList.remove("hidden");
+}
+
+async function runMultiPlan() {
+  if (!state.result) {
+    showError("Analyze a report before planning.");
+    return;
+  }
+
+  const rows = [];
+  for (let index = 0; index < state.multiRows.length; index += 1) {
+    const row = state.multiRows[index];
+    const label = `Row ${index + 1}`;
+    if (!row.instrumentKey) {
+      showError(`${label}: choose an instrument.`);
+      return;
+    }
+    let price = row.price;
+    if (row.source === "fetch") {
+      const quote = state.quotes[row.instrumentKey];
+      if (!quote?.priceCzk) {
+        showError(`${label}: no fetched price. Refresh prices or switch the row to manual.`);
+        return;
+      }
+      price = quote.priceCzk;
+    }
+    rows.push({
+      instrumentKey: row.instrumentKey,
+      quantity: String(row.quantity || ""),
+      pricePerShareCzk: String(price || ""),
+    });
+  }
+
+  setBusy("multiPlanBtn", true);
+  clearError();
+  try {
+    const result = await postJson("/api/plan/batch", {
+      ...payloadBase(),
+      saleDate: $("multiDate").value,
+      rows,
+    });
+    renderScenario("multiResult", result, {});
+  } catch (error) {
+    showError(error.message);
+  } finally {
+    setBusy("multiPlanBtn", false);
+  }
+}
+
+async function runTargetPlan() {
+  if (!state.result) {
+    showError("Analyze a report before planning.");
+    return;
+  }
+
+  const keys = [
+    ...document.querySelectorAll("#targetInstruments input[data-target-key]:checked"),
+  ].map((input) => input.dataset.targetKey);
+  if (!keys.length) {
+    showError("Pick at least one candidate instrument.");
+    return;
+  }
+
+  const quotes = {};
+  keys.forEach((key) => {
+    const quote = state.quotes[key];
+    if (quote?.priceCzk) {
+      quotes[key] = { pricePerShareCzk: String(quote.priceCzk) };
+    }
+  });
+  if (!Object.keys(quotes).length) {
+    showError("No prices available for the selected instruments. Refresh prices first.");
+    return;
+  }
+
+  setBusy("targetPlanBtn", true);
+  clearError();
+  try {
+    const result = await postJson("/api/plan/target-proceeds", {
+      ...payloadBase(),
+      saleDate: $("targetDate").value,
+      targetProceedsCzk: String($("targetAmount").value || ""),
+      optimizationMode: $("targetMode").value,
+      candidateInstrumentKeys: keys,
+      quotes,
+    });
+    renderScenario("targetResult", result, { optimizer: true });
+  } catch (error) {
+    showError(error.message);
+  } finally {
+    setBusy("targetPlanBtn", false);
+  }
+}
+
+function renderScenario(containerId, result, opts = {}) {
+  const box = $(containerId);
+  const metrics = [];
+  if (result.targetProceedsCzk != null) {
+    metrics.push(["Target", czk(result.targetProceedsCzk)]);
+  }
+  metrics.push(["Est. proceeds", czk(result.estimatedProceedsCzk)]);
+  if (Number(result.shortfallCzk || 0) > 0) {
+    metrics.push(["Shortfall", czk(result.shortfallCzk)]);
+  }
+  metrics.push(["Taxable gain delta", czk(result.taxableGainDeltaCzk)]);
+  metrics.push(["Tax delta at 15%", czk(result.estimatedTaxDelta15Czk)]);
+  metrics.push(["After-sale gross proceeds", czk(result.afterSummary.grossProceedsCzk)]);
+
+  const optimizerNote =
+    opts.optimizer && result.optimizer
+      ? `<p class="plan-summary-note">OPTIMIZER: ${escapeHtml(result.optimizer.mode)} · ${escapeHtml(
+          result.optimizer.strategy
+        )} · target ${result.optimizer.targetReached ? "reached" : "NOT reached"} · ${
+          result.optimizer.candidateCount
+        } candidate lots</p>`
+      : "";
+
+  const rows = result.rows || [];
+  const rowsTable = rows.length
+    ? `
+      <div class="plan-rows-table">
+        <table>
+          <thead><tr><th>Sell</th><th>Qty</th><th>Px CZK</th><th>Proceeds</th><th>Taxable gain</th><th>Status</th><th>Remaining</th></tr></thead>
+          <tbody>
+            ${rows
+              .map(
+                (row) => `
+                  <tr>
+                    <td>${instrumentLabel(row)}</td>
+                    <td class="num">${qty(row.quantity)}</td>
+                    <td class="num">${czk(row.pricePerShareCzk)}</td>
+                    <td class="num">${czk(row.estimatedProceedsCzk)}</td>
+                    <td class="num">${czk(row.taxableGainCzk)}</td>
+                    <td><span class="badge ${Number(row.taxableGainCzk) > 0 ? "tax" : "ok"}">${escapeHtml(
+                  row.taxStatusSummary || ""
+                )}</span></td>
+                    <td class="num">${qty(row.remainingQuantity)}</td>
+                  </tr>
+                `
+              )
+              .join("")}
+          </tbody>
+        </table>
+      </div>
+    `
+    : "";
+
+  const groups = result.lotGroups || [];
+  const groupTable = groups.length
+    ? `
+      <div class="plan-group-table">
+        <div class="plan-group-head">
+          <span>Lot range</span>
+          <span>Qty</span>
+          <span>Proceeds</span>
+          <span>Cost</span>
+          <span>Gain</span>
+          <span>Status</span>
+        </div>
+        ${groups
+          .map(
+            (group) => `
+              <div class="plan-group-row">
+                <span>${escapeHtml(`${group.ticker || group.instrumentKey} · ${planDateRange(group)}`)}</span>
+                <span class="num">${qty(group.quantity)}</span>
+                <span class="num">${czk(group.grossProceedsCzk)}</span>
+                <span class="num">${czk(group.costCzk)}</span>
+                <span class="num">${czk(group.gainCzk)}</span>
+                <span><span class="badge ${group.taxable ? "tax" : "ok"}">${escapeHtml(group.status)}</span></span>
+              </div>
+            `
+          )
+          .join("")}
+      </div>
+    `
+    : "";
+
+  const warningsNote = (result.warnings || []).length
+    ? `<p class="plan-summary-note" style="color: var(--amber)">${result.warnings
+        .map((warning) => escapeHtml(warning))
+        .join("<br>")}</p>`
+    : "";
+
+  box.innerHTML = `
+    <div class="plan-result-grid">
+      ${metrics
+        .map(([label, value]) => `<div><span>${escapeHtml(label)}</span><strong>${escapeHtml(value)}</strong></div>`)
+        .join("")}
+    </div>
+    ${optimizerNote}
+    ${rowsTable}
+    ${groupTable}
+    ${warningsNote}
+  `;
+  box.classList.remove("hidden");
+}
+
+function roundCzk(value) {
+  return Number(value || 0).toFixed(2);
+}
+
+function formatAsOf(value) {
+  if (!value) return "unknown time";
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return String(value);
+  return date.toLocaleString("cs-CZ", { dateStyle: "short", timeStyle: "short" });
 }
 
 function renderPlan(result) {
