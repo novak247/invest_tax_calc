@@ -34,6 +34,14 @@ from invest_tax_calc.email_import.providers import Attachment, GmailClient
 from invest_tax_calc.email_import.scopes import GMAIL_READONLY_SCOPE
 from invest_tax_calc.email_import.storage import AttachmentStore, ImportLedger
 from invest_tax_calc.models import Money, Trade
+from invest_tax_calc.planner import plan_sale_batch, plan_target_proceeds
+from invest_tax_calc.prices import (
+    InstrumentRef,
+    PriceCache,
+    PriceProvider,
+    YahooPriceProvider,
+    quote_instruments,
+)
 from invest_tax_calc.t212_pdf import parse_trading212_pdf_job
 from invest_tax_calc.tax import analyze_transactions, parse_rate_table, plan_sale
 
@@ -52,6 +60,8 @@ GMAIL_CONFIG_PATH = APP_DATA_DIR / "gmail_oauth_client.json"
 GMAIL_TOKEN_PATH = APP_DATA_DIR / "gmail_token.json"
 PDF_PARSE_CACHE_DIR = APP_DATA_DIR / "parsed_pdf_cache"
 PDF_PARSE_CACHE_VERSION = "trading212_pdf_v1"
+PRICE_CACHE_PATH = APP_DATA_DIR / "price_cache.json"
+PRICE_PROVIDER: PriceProvider = YahooPriceProvider()
 DEV_RELOAD_TOKEN = f"{os.getpid()}:{time.time_ns()}"
 # Bundling a full history of Trading 212 PDF statements (hundreds of distinct
 # reports, base64-encoded) easily exceeds tens of MB in a single analyze POST.
@@ -451,6 +461,24 @@ class Handler(BaseHTTPRequestHandler):
                 self._send_json(result)
                 return
 
+            if self.path == "/api/plan/batch":
+                payload = self._read_json()
+                result = self._handle_plan_batch(payload)
+                self._send_json(result)
+                return
+
+            if self.path == "/api/plan/target-proceeds":
+                payload = self._read_json()
+                result = self._handle_plan_target(payload)
+                self._send_json(result)
+                return
+
+            if self.path == "/api/prices/quote":
+                payload = self._read_json()
+                result = handle_price_quote(payload)
+                self._send_json(result)
+                return
+
             if self.path == "/api/email/gmail/start":
                 payload = self._read_json()
                 result = self._handle_gmail_start(payload)
@@ -507,14 +535,61 @@ class Handler(BaseHTTPRequestHandler):
         rates = parse_rate_table(str(payload.get("rates") or ""))
         transactions = self._parse_report_transactions(payload)
 
-        return plan_sale(
-            transactions,
-            rates=rates,
-            instrument_key=str(payload.get("instrumentKey") or ""),
-            quantity=str(payload.get("quantity") or ""),
-            price_per_share_czk=str(payload.get("pricePerShareCzk") or ""),
-            sale_date=str(payload.get("saleDate") or ""),
+        try:
+            return plan_sale(
+                transactions,
+                rates=rates,
+                instrument_key=str(payload.get("instrumentKey") or ""),
+                quantity=str(payload.get("quantity") or ""),
+                price_per_share_czk=str(payload.get("pricePerShareCzk") or ""),
+                sale_date=str(payload.get("saleDate") or ""),
+            )
+        except ValueError as exc:
+            raise AppError(str(exc)) from exc
+
+    def _handle_plan_batch(self, payload: dict[str, Any]) -> dict[str, Any]:
+        rates = parse_rate_table(str(payload.get("rates") or ""))
+        transactions = self._parse_report_transactions(payload)
+        rows = payload.get("rows")
+        if not isinstance(rows, list) or not rows:
+            raise AppError("Add at least one sale row to plan.")
+
+        try:
+            return plan_sale_batch(
+                transactions,
+                rates=rates,
+                sale_date=str(payload.get("saleDate") or ""),
+                rows=[row for row in rows if isinstance(row, dict)],
+            )
+        except ValueError as exc:
+            raise AppError(str(exc)) from exc
+
+    def _handle_plan_target(self, payload: dict[str, Any]) -> dict[str, Any]:
+        rates = parse_rate_table(str(payload.get("rates") or ""))
+        transactions = self._parse_report_transactions(payload)
+
+        raw_keys = payload.get("candidateInstrumentKeys")
+        candidate_keys = (
+            [str(key) for key in raw_keys if str(key or "").strip()]
+            if isinstance(raw_keys, list)
+            else None
         )
+        quotes = payload.get("quotes")
+        if not isinstance(quotes, dict):
+            quotes = {}
+
+        try:
+            return plan_target_proceeds(
+                transactions,
+                rates=rates,
+                sale_date=str(payload.get("saleDate") or ""),
+                target_proceeds_czk=str(payload.get("targetProceedsCzk") or ""),
+                optimization_mode=str(payload.get("optimizationMode") or "min_tax"),
+                candidate_instrument_keys=candidate_keys,
+                quotes=quotes,
+            )
+        except ValueError as exc:
+            raise AppError(str(exc)) from exc
 
     def _parse_report_transactions(self, payload: dict[str, Any]) -> list:
         jobs = self._pdf_report_jobs(payload)
@@ -822,6 +897,42 @@ class Handler(BaseHTTPRequestHandler):
             server_host, server_port = self.server.server_address[:2]
             host = f"{server_host}:{server_port}"
         return f"http://{host}"
+
+
+def handle_price_quote(
+    payload: dict[str, Any],
+    *,
+    provider: PriceProvider | None = None,
+    cache: PriceCache | None = None,
+) -> dict[str, Any]:
+    raw_instruments = payload.get("instruments")
+    if not isinstance(raw_instruments, list) or not raw_instruments:
+        raise AppError("Send at least one instrument to quote.")
+
+    instruments: list[InstrumentRef] = []
+    for item in raw_instruments:
+        if not isinstance(item, dict):
+            raise AppError("Each instrument must be an object.")
+        instrument_key = str(item.get("instrumentKey") or "").strip()
+        if not instrument_key:
+            raise AppError("Each instrument needs an instrumentKey.")
+        instruments.append(
+            InstrumentRef(
+                instrument_key=instrument_key,
+                ticker=str(item.get("ticker") or "").strip(),
+                isin=str(item.get("isin") or "").strip(),
+            )
+        )
+
+    rates = parse_rate_table(str(payload.get("rates") or ""))
+    quotes, warnings = quote_instruments(
+        instruments,
+        provider=provider or PRICE_PROVIDER,
+        rates=rates,
+        cache=cache if cache is not None else PriceCache(PRICE_CACHE_PATH),
+        force_refresh=bool(payload.get("forceRefresh")),
+    )
+    return {"quotes": quotes, "warnings": warnings}
 
 
 def _get_gmail_session(state: str) -> GmailImportSession:
