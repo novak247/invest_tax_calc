@@ -603,11 +603,12 @@ async function refreshPrices(busyId) {
 
     const count = Object.keys(state.quotes).length;
     const warningText = (result.warnings || []).join(" · ");
+    const fxText = formatFxRates(result.fxRates);
     ["multiPriceMeta", "targetPriceMeta"].forEach((id) => {
       const el = $(id);
       el.innerHTML = `<b>${count}</b> quote${count === 1 ? "" : "s"} fetched${
-        warningText ? ` · ${escapeHtml(warningText)}` : ""
-      }`;
+        fxText ? ` · FX fetched: ${escapeHtml(fxText)}` : ""
+      }${warningText ? ` · ${escapeHtml(warningText)}` : ""}`;
       el.classList.remove("hidden");
     });
   } catch (error) {
@@ -652,6 +653,12 @@ async function fetchSinglePrice() {
   }
 }
 
+function formatFxRates(fxRates) {
+  return Object.entries(fxRates || {})
+    .map(([currency, rate]) => `${currency}=${Number(rate).toFixed(3)}`)
+    .join(", ");
+}
+
 function updateSinglePriceMeta() {
   const quote = state.quotes[$("planInstrument").value];
   const el = $("planPriceMeta");
@@ -659,9 +666,15 @@ function updateSinglePriceMeta() {
     el.classList.add("hidden");
     return;
   }
+  const fxBit =
+    quote.currency && quote.currency !== "CZK" && quote.fxRate
+      ? ` · ${escapeHtml(quote.currency)}=${escapeHtml(Number(quote.fxRate).toFixed(3))}${
+          quote.fxSource === "fetched" ? " (fetched)" : ""
+        }`
+      : "";
   el.innerHTML = `PX <b>${escapeHtml(roundCzk(quote.priceCzk))} CZK</b> · ${escapeHtml(
     quote.provider || ""
-  )}${quote.symbol ? ` (${escapeHtml(quote.symbol)})` : ""} · as of <b>${escapeHtml(
+  )}${quote.symbol ? ` (${escapeHtml(quote.symbol)})` : ""}${fxBit} · as of <b>${escapeHtml(
     formatAsOf(quote.asOf)
   )}</b>`;
   el.classList.remove("hidden");

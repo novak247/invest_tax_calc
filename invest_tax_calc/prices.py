@@ -88,6 +88,11 @@ class PriceProvider:
     ) -> tuple[dict[str, PriceQuote], list[str]]:
         raise NotImplementedError
 
+    def fx_to_czk(self, currencies: list[str]) -> tuple[dict[str, Decimal], list[str]]:
+        """Return CZK rates for the given currencies. Providers without FX
+        support return nothing; the per-quote payload warning still fires."""
+        return {}, []
+
 
 class YahooPriceProvider(PriceProvider):
     """Best-effort quotes from Yahoo Finance public endpoints (no API key).
@@ -180,6 +185,37 @@ class YahooPriceProvider(PriceProvider):
         if not isinstance(results, list):
             return []
         return [str(item.get("symbol")) for item in results if isinstance(item, dict) and item.get("symbol")]
+
+    def fx_to_czk(self, currencies: list[str]) -> tuple[dict[str, Decimal], list[str]]:
+        rates: dict[str, Decimal] = {}
+        warnings: list[str] = []
+        usd_czk: Decimal | None = None
+        for currency in currencies:
+            rate = self._chart_price(f"{currency}CZK=X")
+            if rate is None:
+                # Yahoo has no direct pair for exotics like MXNCZK; cross via USD
+                # ("MXN=X" is USD->MXN, "CZK=X" is USD->CZK).
+                if usd_czk is None:
+                    usd_czk = self._chart_price("CZK=X")
+                usd_to_currency = self._chart_price(f"{currency}=X")
+                if usd_czk and usd_to_currency:
+                    rate = (usd_czk / usd_to_currency).quantize(Decimal("0.000001"))
+            if rate is None or rate <= 0:
+                warnings.append(f"Could not fetch a CZK FX rate for {currency}.")
+                continue
+            rates[currency] = rate
+        return rates, warnings
+
+    def _chart_price(self, symbol: str) -> Decimal | None:
+        meta = self._chart_meta(symbol)
+        price = meta.get("regularMarketPrice") if meta else None
+        if price is None:
+            return None
+        try:
+            rate = Decimal(str(price))
+        except InvalidOperation:
+            return None
+        return rate if rate > 0 else None
 
     def _chart_meta(self, symbol: str) -> dict[str, Any] | None:
         url = (
@@ -274,6 +310,30 @@ class PriceCache:
         except (KeyError, InvalidOperation, ValueError):
             return None
 
+    def _fx_key(self, provider: str, currency: str) -> str:
+        return f"{provider}::fx::{currency}"
+
+    def get_fx(self, provider: str, currency: str) -> Decimal | None:
+        entry = self._entries.get(self._fx_key(provider, currency))
+        if not isinstance(entry, dict):
+            return None
+        cached_at = entry.get("cachedAtUnix")
+        if not isinstance(cached_at, (int, float)):
+            return None
+        if self._now() - cached_at > self.ttl_seconds:
+            return None
+        try:
+            return Decimal(str(entry["rateCzk"]))
+        except (KeyError, InvalidOperation, ValueError):
+            return None
+
+    def set_fx(self, provider: str, currency: str, rate: Decimal) -> None:
+        self._entries[self._fx_key(provider, currency)] = {
+            "currency": currency,
+            "rateCzk": str(rate),
+            "cachedAtUnix": self._now(),
+        }
+
     def set(self, quote: PriceQuote) -> None:
         self._entries[self._key(quote.provider, quote.instrument_key)] = {
             "instrumentKey": quote.instrument_key,
@@ -296,8 +356,13 @@ def quote_instruments(
     rates: dict[str, Decimal],
     cache: PriceCache | None = None,
     force_refresh: bool = False,
-) -> tuple[dict[str, dict[str, Any]], list[str]]:
-    """Fetch quotes, serving fresh cache entries first, and convert to CZK."""
+) -> tuple[dict[str, dict[str, Any]], list[str], dict[str, str]]:
+    """Fetch quotes, serving fresh cache entries first, and convert to CZK.
+
+    Currencies missing from the user's FX table are fetched from the provider
+    (and cached) so quotes in CHF/MXN/etc. still get a ``priceCzk``. Returns
+    ``(quotes, warnings, fetched_fx_rates)``.
+    """
     warnings: list[str] = []
     quotes: dict[str, PriceQuote] = {}
     missing: list[InstrumentRef] = []
@@ -321,10 +386,41 @@ def quote_instruments(
             if fetched:
                 cache.save()
 
+    effective_rates = dict(rates)
+    fetched_fx: dict[str, Decimal] = {}
+    needed_currencies = sorted(
+        {_normalize_currency(q.price, q.currency)[1] for q in quotes.values()}
+        - {"CZK"}
+        - set(effective_rates)
+    )
+    missing_fx: list[str] = []
+    for currency in needed_currencies:
+        cached_rate = None
+        if cache is not None and not force_refresh:
+            cached_rate = cache.get_fx(provider.name, currency)
+        if cached_rate is not None:
+            fetched_fx[currency] = cached_rate
+        else:
+            missing_fx.append(currency)
+    if missing_fx:
+        fx_rates, fx_warnings = provider.fx_to_czk(missing_fx)
+        warnings.extend(fx_warnings)
+        fetched_fx.update(fx_rates)
+        if cache is not None and fx_rates:
+            for currency, rate in fx_rates.items():
+                cache.set_fx(provider.name, currency, rate)
+            cache.save()
+    effective_rates.update(fetched_fx)
+
     payload: dict[str, dict[str, Any]] = {}
     for instrument_key, quote in quotes.items():
-        quote_payload, warning = quote.payload(rates=rates)
+        quote_payload, warning = quote.payload(rates=effective_rates)
         if warning:
             warnings.append(warning)
+        currency = quote_payload["currency"]
+        if currency in fetched_fx:
+            quote_payload["fxSource"] = "fetched"
+        else:
+            quote_payload["fxSource"] = "user" if currency != "CZK" and quote_payload["fxRate"] else ""
         payload[instrument_key] = quote_payload
-    return payload, warnings
+    return payload, warnings, {cur: str(rate) for cur, rate in fetched_fx.items()}

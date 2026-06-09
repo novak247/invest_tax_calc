@@ -925,14 +925,14 @@ def handle_price_quote(
         )
 
     rates = parse_rate_table(str(payload.get("rates") or ""))
-    quotes, warnings = quote_instruments(
+    quotes, warnings, fx_rates = quote_instruments(
         instruments,
         provider=provider or PRICE_PROVIDER,
         rates=rates,
         cache=cache if cache is not None else PriceCache(PRICE_CACHE_PATH),
         force_refresh=bool(payload.get("forceRefresh")),
     )
-    return {"quotes": quotes, "warnings": warnings}
+    return {"quotes": quotes, "warnings": warnings, "fxRates": fx_rates}
 
 
 def _get_gmail_session(state: str) -> GmailImportSession:

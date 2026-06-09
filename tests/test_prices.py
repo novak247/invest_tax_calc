@@ -32,9 +32,11 @@ def quote(key: str, price: str, currency: str = "EUR") -> PriceQuote:
 class FakeProvider(PriceProvider):
     name = "fake"
 
-    def __init__(self, quotes: dict[str, PriceQuote]):
+    def __init__(self, quotes: dict[str, PriceQuote], fx: dict[str, Decimal] | None = None):
         self.quotes = quotes
+        self.fx = fx or {}
         self.calls = 0
+        self.fx_calls = 0
 
     def quote_many(self, instruments):
         self.calls += 1
@@ -50,11 +52,21 @@ class FakeProvider(PriceProvider):
         ]
         return found, warnings
 
+    def fx_to_czk(self, currencies):
+        self.fx_calls += 1
+        found = {currency: self.fx[currency] for currency in currencies if currency in self.fx}
+        warnings = [
+            f"Could not fetch a CZK FX rate for {currency}."
+            for currency in currencies
+            if currency not in self.fx
+        ]
+        return found, warnings
+
 
 class QuoteInstrumentsTest(unittest.TestCase):
     def test_converts_to_czk_with_fx_rates(self) -> None:
         provider = FakeProvider({VUAA.instrument_key: quote(VUAA.instrument_key, "112.34")})
-        quotes, warnings = quote_instruments(
+        quotes, warnings, fx = quote_instruments(
             [VUAA], provider=provider, rates={"EUR": Decimal("24.82")}
         )
 
@@ -63,11 +75,40 @@ class QuoteInstrumentsTest(unittest.TestCase):
         self.assertEqual(payload["fxRate"], "24.82")
         self.assertEqual(payload["priceCzk"], "2788.2788")
         self.assertEqual(payload["currency"], "EUR")
+        self.assertEqual(payload["fxSource"], "user")
         self.assertEqual(warnings, [])
+        self.assertEqual(fx, {})
+
+    def test_missing_fx_rate_is_fetched_from_provider(self) -> None:
+        provider = FakeProvider(
+            {VUAA.instrument_key: quote(VUAA.instrument_key, "112.34")},
+            fx={"EUR": Decimal("24.82")},
+        )
+        quotes, warnings, fx = quote_instruments([VUAA], provider=provider, rates={})
+
+        payload = quotes[VUAA.instrument_key]
+        self.assertEqual(payload["priceCzk"], "2788.2788")
+        self.assertEqual(payload["fxRate"], "24.82")
+        self.assertEqual(payload["fxSource"], "fetched")
+        self.assertEqual(fx, {"EUR": "24.82"})
+        self.assertEqual(warnings, [])
+
+    def test_user_rates_win_over_fetched_fx(self) -> None:
+        provider = FakeProvider(
+            {VUAA.instrument_key: quote(VUAA.instrument_key, "100")},
+            fx={"EUR": Decimal("99")},
+        )
+        quotes, _, fx = quote_instruments(
+            [VUAA], provider=provider, rates={"EUR": Decimal("25")}
+        )
+
+        self.assertEqual(quotes[VUAA.instrument_key]["priceCzk"], "2500")
+        self.assertEqual(provider.fx_calls, 0)
+        self.assertEqual(fx, {})
 
     def test_missing_fx_rate_warns_and_leaves_czk_blank(self) -> None:
         provider = FakeProvider({VUAA.instrument_key: quote(VUAA.instrument_key, "112.34")})
-        quotes, warnings = quote_instruments([VUAA], provider=provider, rates={})
+        quotes, warnings, _ = quote_instruments([VUAA], provider=provider, rates={})
 
         self.assertEqual(quotes[VUAA.instrument_key]["priceCzk"], "")
         self.assertTrue(any("FX rate" in warning for warning in warnings))
@@ -76,7 +117,7 @@ class QuoteInstrumentsTest(unittest.TestCase):
         provider = FakeProvider(
             {VUAA.instrument_key: quote(VUAA.instrument_key, "2850", currency="GBp")}
         )
-        quotes, _ = quote_instruments(
+        quotes, _, _ = quote_instruments(
             [VUAA], provider=provider, rates={"GBP": Decimal("29.40")}
         )
 
@@ -85,9 +126,20 @@ class QuoteInstrumentsTest(unittest.TestCase):
         self.assertEqual(Decimal(payload["price"]), Decimal("28.5"))
         self.assertEqual(Decimal(payload["priceCzk"]), Decimal("837.90"))
 
+    def test_pence_quotes_fetch_gbp_fx_not_gbp_pence(self) -> None:
+        provider = FakeProvider(
+            {VUAA.instrument_key: quote(VUAA.instrument_key, "2850", currency="GBp")},
+            fx={"GBP": Decimal("29.40")},
+        )
+        quotes, warnings, fx = quote_instruments([VUAA], provider=provider, rates={})
+
+        self.assertEqual(Decimal(quotes[VUAA.instrument_key]["priceCzk"]), Decimal("837.90"))
+        self.assertEqual(fx, {"GBP": "29.40"})
+        self.assertEqual(warnings, [])
+
     def test_unmapped_instrument_returns_warning(self) -> None:
         provider = FakeProvider({})
-        quotes, warnings = quote_instruments([VUAA], provider=provider, rates={})
+        quotes, warnings, _ = quote_instruments([VUAA], provider=provider, rates={})
 
         self.assertEqual(quotes, {})
         self.assertTrue(any("Could not map" in warning for warning in warnings))
@@ -123,6 +175,22 @@ class PriceCacheTest(unittest.TestCase):
         quote_instruments([VUAA], provider=provider, rates={}, cache=self.make_cache(ttl=600))
 
         self.assertEqual(provider.calls, 2)
+
+    def test_fetched_fx_rate_is_cached(self) -> None:
+        provider = FakeProvider(
+            {VUAA.instrument_key: quote(VUAA.instrument_key, "112.34")},
+            fx={"EUR": Decimal("24.82")},
+        )
+        quote_instruments([VUAA], provider=provider, rates={}, cache=self.make_cache())
+        self.assertEqual(provider.fx_calls, 1)
+
+        # Quote comes from cache too, so neither provider call repeats.
+        quote_instruments([VUAA], provider=provider, rates={}, cache=self.make_cache())
+        self.assertEqual(provider.fx_calls, 1)
+
+        self.now += 601
+        quote_instruments([VUAA], provider=provider, rates={}, cache=self.make_cache())
+        self.assertEqual(provider.fx_calls, 2)
 
     def test_force_refresh_skips_cache(self) -> None:
         provider = FakeProvider({VUAA.instrument_key: quote(VUAA.instrument_key, "112.34")})
@@ -169,6 +237,30 @@ class YahooProviderTest(unittest.TestCase):
         self.assertEqual(result.symbol, "VUAA.L")
         self.assertEqual(result.market_status, "REGULAR")
 
+    def test_fx_to_czk_uses_chart_endpoint(self) -> None:
+        def chart(price: float) -> dict:
+            return {"chart": {"result": [{"meta": {"regularMarketPrice": price}}]}}
+
+        def fetch_json(url: str) -> dict:
+            if "finance/chart/CHFCZK" in url:
+                return chart(27.15)
+            # No direct pair for MXN -> cross via USD.
+            if "finance/chart/MXNCZK" in url or "finance/chart/XXX" in url:
+                return {"chart": {"result": []}}
+            if "finance/chart/CZK%3DX" in url:
+                return chart(21.0)
+            if "finance/chart/MXN%3DX" in url:
+                return chart(17.5)
+            raise AssertionError(f"Unexpected URL: {url}")
+
+        provider = YahooPriceProvider(fetch_json=fetch_json)
+        rates, warnings = provider.fx_to_czk(["CHF", "MXN", "XXX"])
+
+        self.assertEqual(rates["CHF"], Decimal("27.15"))
+        self.assertEqual(rates["MXN"], Decimal("1.2"))
+        self.assertTrue(any("XXX" in warning for warning in warnings))
+        self.assertFalse(any("MXN" in warning for warning in warnings))
+
     def test_unresolvable_symbol_warns(self) -> None:
         def fetch_json(url: str) -> dict:
             if "finance/search" in url:
@@ -208,6 +300,36 @@ class PriceQuoteEndpointTest(unittest.TestCase):
             result["quotes"][VUAA.instrument_key]["priceCzk"], "2788.2788"
         )
         self.assertEqual(result["warnings"], [])
+        self.assertEqual(result["fxRates"], {})
+
+    def test_handle_price_quote_fetches_missing_fx(self) -> None:
+        import app
+
+        provider = FakeProvider(
+            {VUAA.instrument_key: quote(VUAA.instrument_key, "112.34")},
+            fx={"EUR": Decimal("24.82")},
+        )
+        with tempfile.TemporaryDirectory() as tmp:
+            cache = PriceCache(Path(tmp) / "cache.json")
+            result = app.handle_price_quote(
+                {
+                    "instruments": [
+                        {
+                            "instrumentKey": VUAA.instrument_key,
+                            "ticker": "VUAA",
+                            "isin": "IE00BFMXXD54",
+                        }
+                    ]
+                },
+                provider=provider,
+                cache=cache,
+            )
+
+        self.assertEqual(result["fxRates"], {"EUR": "24.82"})
+        self.assertEqual(
+            result["quotes"][VUAA.instrument_key]["priceCzk"], "2788.2788"
+        )
+        self.assertEqual(result["quotes"][VUAA.instrument_key]["fxSource"], "fetched")
 
     def test_handle_price_quote_requires_instruments(self) -> None:
         import app
