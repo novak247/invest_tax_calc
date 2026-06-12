@@ -8,20 +8,22 @@ from typing import Any, Callable
 from .models import Money, Trade
 from .tax import (
     PLANNED_SALE_ID,
+    QTY_EPSILON,
     TAX_RATE_BASIC,
     TIME_TEST_YEARS,
     _add_years,
+    _ensure_sellable_quantity,
     _find_instrument_display,
     _match_lots,
     _num,
     _parse_date,
     _parse_decimal,
     _qty,
+    _transactions_on_or_before,
     analyze_transactions,
 )
 
 OPTIMIZATION_MODES = ("min_tax", "min_taxable_gain", "preserve_tax_free", "fifo")
-QTY_EPSILON = Decimal("0.00000001")
 PROCEEDS_TOLERANCE_CZK = Decimal("0.01")
 
 
@@ -87,6 +89,16 @@ def plan_sale_batch(
                 "price": price,
             }
         )
+
+    # Rows for the same instrument draw from the same holdings, so the
+    # oversell check must validate their combined quantity, not each row.
+    combined: dict[str, Decimal] = {}
+    for row in row_inputs:
+        combined[row["instrumentKey"]] = (
+            combined.get(row["instrumentKey"], Decimal("0")) + row["quantity"]
+        )
+    for instrument_key, total_qty in combined.items():
+        _ensure_sellable_quantity(holdings, instrument_key, total_qty, planned_date)
 
     after = analyze_transactions(
         transactions + planned_trades,
@@ -267,7 +279,10 @@ def _candidate_lots(
     prices: dict[str, Decimal],
     warnings: list[str],
 ) -> dict[str, list[_LotCandidate]]:
-    _, holdings_lots, _ = _match_lots(transactions, rates)
+    # Lots bought after the planned sale date cannot be sold on it.
+    _, holdings_lots, _ = _match_lots(
+        _transactions_on_or_before(transactions, planned_date), rates
+    )
     requested = [key for key in (candidate_keys or []) if key]
     keys = requested or sorted(holdings_lots)
 

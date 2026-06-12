@@ -117,5 +117,92 @@ class TaxEngineTest(unittest.TestCase):
         self.assertEqual(groups[1]["quantity"], 15.0)
 
 
+class AsOfCutoffTest(unittest.TestCase):
+    def test_future_buy_is_excluded_from_holdings(self) -> None:
+        result = analyze_transactions(
+            [
+                trade("buy", "2025-01-01T10:00:00", "10", "50000", "b1"),
+                trade("buy", "2026-12-01T10:00:00", "10", "50000", "b-future"),
+            ],
+            rates={},
+            as_of="2026-01-01",
+        )
+
+        self.assertEqual(result["buyCount"], 1)
+        self.assertEqual(len(result["holdings"]), 1)
+        self.assertEqual(result["holdings"][0]["quantity"], 10.0)
+        self.assertEqual(len(result["holdings"][0]["lots"]), 1)
+
+    def test_future_sell_does_not_affect_summary_or_warnings(self) -> None:
+        result = analyze_transactions(
+            [
+                trade("buy", "2025-01-01T10:00:00", "10", "50000", "b1"),
+                # 20 units sold while only 10 are held: would warn about an
+                # unmatched sell if the future transaction leaked in.
+                trade("sell", "2026-12-01T10:00:00", "20", "200000", "s-future"),
+            ],
+            rates={},
+            tax_year=2026,
+            as_of="2026-01-01",
+        )
+
+        self.assertEqual(result["sellCount"], 0)
+        self.assertEqual(result["summary"]["grossProceedsCzk"], 0.0)
+        self.assertEqual(result["warnings"], [])
+        self.assertEqual(result["holdings"][0]["quantity"], 10.0)
+
+    def test_real_unmatched_sell_before_as_of_still_warns(self) -> None:
+        result = analyze_transactions(
+            [trade("sell", "2025-06-01T10:00:00", "5", "20000", "s1")],
+            rates={},
+            tax_year=2025,
+            as_of="2025-12-31",
+        )
+
+        self.assertEqual(len(result["warnings"]), 1)
+        self.assertIn("without a matching buy lot", result["warnings"][0])
+
+
+class PlanSaleOversellTest(unittest.TestCase):
+    def buy_ten(self) -> list:
+        return [trade("buy", "2025-01-01T10:00:00", "10", "50000", "b1")]
+
+    def plan(self, txs: list, quantity: str, sale_date: str = "2025-06-01") -> dict:
+        return plan_sale(
+            txs,
+            rates={},
+            instrument_key="ISIN:IE00TEST",
+            quantity=quantity,
+            price_per_share_czk="6000",
+            sale_date=sale_date,
+        )
+
+    def test_oversell_is_rejected_with_clear_error(self) -> None:
+        with self.assertRaises(ValueError) as ctx:
+            self.plan(self.buy_ten(), "15")
+
+        message = str(ctx.exception)
+        self.assertIn("ETF", message)
+        self.assertIn("15", message)
+        self.assertIn("10", message)
+
+    def test_sale_before_purchase_is_rejected(self) -> None:
+        txs = [trade("buy", "2025-06-01T10:00:00", "10", "50000", "b1")]
+        with self.assertRaises(ValueError):
+            self.plan(txs, "5", sale_date="2025-01-01")
+
+    def test_exact_full_position_sale_succeeds(self) -> None:
+        result = self.plan(self.buy_ten(), "10")
+        self.assertEqual(result["plannedProceedsCzk"], 60000.0)
+
+    def test_tiny_rounding_overshoot_is_tolerated(self) -> None:
+        result = self.plan(self.buy_ten(), "10.000000005")
+        self.assertEqual(result["plannedProceedsCzk"], 60000.0)
+
+    def test_overshoot_beyond_epsilon_is_rejected(self) -> None:
+        with self.assertRaises(ValueError):
+            self.plan(self.buy_ten(), "10.0000001")
+
+
 if __name__ == "__main__":
     unittest.main()

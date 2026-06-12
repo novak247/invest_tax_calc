@@ -12,6 +12,7 @@ GROSS_PROCEEDS_EXEMPTION_CZK = Decimal("100000")
 TIME_TEST_YEARS = 3
 TAX_RATE_BASIC = Decimal("0.15")
 PLANNED_SALE_ID = "planned-sale"
+QTY_EPSILON = Decimal("0.00000001")
 
 
 def parse_rate_table(text: str) -> dict[str, Decimal]:
@@ -49,6 +50,9 @@ def analyze_transactions(
         return {}
 
     as_of_date = _parse_date(as_of) if as_of else date.today()
+    # Transactions after the analysis date do not exist yet from its point of
+    # view: they must not shape holdings, lot matching, summaries or warnings.
+    transactions = _transactions_on_or_before(transactions, as_of_date)
     matches, holdings, warnings = _match_lots(transactions, rates)
     years = sorted({match["sale_date"].year for match in matches})
     selected_year = tax_year or (years[-1] if years else as_of_date.year)
@@ -107,7 +111,9 @@ def plan_sale(
         as_of=planned_date,
     )
 
-    display = _find_instrument_display(baseline.get("holdings", []), instrument_key)
+    holdings = baseline.get("holdings", [])
+    _ensure_sellable_quantity(holdings, instrument_key, qty, planned_date)
+    display = _find_instrument_display(holdings, instrument_key)
     planned = Trade(
         source="Planner",
         source_id=PLANNED_SALE_ID,
@@ -294,7 +300,7 @@ def _match_lots(
             lot.quantity_remaining -= matched_qty
             remaining -= matched_qty
 
-        if remaining > Decimal("0.00000001"):
+        if remaining > QTY_EPSILON:
             ratio = remaining / tx.quantity
             proceeds = gross_czk * ratio
             sale_fees = fees_czk * ratio
@@ -374,7 +380,7 @@ def _summarize_year(matches: list[dict[str, Any]], year: int) -> dict[str, Any]:
 def _holdings_payload(holdings: dict[str, list[TaxLot]], as_of: date) -> list[dict[str, Any]]:
     payload: list[dict[str, Any]] = []
     for instrument_key, lots in sorted(holdings.items()):
-        open_lots = [lot for lot in lots if lot.quantity_remaining > Decimal("0.00000001")]
+        open_lots = [lot for lot in lots if lot.quantity_remaining > QTY_EPSILON]
         if not open_lots:
             continue
 
@@ -459,6 +465,39 @@ def _match_payload(match: dict[str, Any], gross_limit_applies: bool) -> dict[str
         "taxable": taxable,
         "status": status,
     }
+
+
+def _transactions_on_or_before(transactions: list[Trade], as_of: date) -> list[Trade]:
+    return [tx for tx in transactions if tx.traded_at.date() <= as_of]
+
+
+def _available_quantity(holdings: list[dict[str, Any]], instrument_key: str) -> Decimal:
+    for holding in holdings:
+        if holding.get("instrumentKey") == instrument_key:
+            return Decimal(str(holding.get("quantity") or "0"))
+    return Decimal("0")
+
+
+def _ensure_sellable_quantity(
+    holdings: list[dict[str, Any]],
+    instrument_key: str,
+    quantity: Decimal,
+    sale_date: date,
+) -> None:
+    """Reject planned sales that exceed what is actually held on the sale date.
+
+    Only planned trades go through this check; genuine imported sells keep the
+    existing unmatched-sale warning path so broken statements stay visible.
+    """
+    available = _available_quantity(holdings, instrument_key)
+    if quantity <= available + QTY_EPSILON:
+        return
+    display = _find_instrument_display(holdings, instrument_key)
+    label = display.get("ticker") or display.get("name") or instrument_key
+    raise ValueError(
+        f"Planned sale of {label} on {sale_date.isoformat()} asks for "
+        f"{_qty(quantity)} units, but only {_qty(available)} are held on that date."
+    )
 
 
 def _find_instrument_display(holdings: list[dict[str, Any]], instrument_key: str) -> dict[str, str]:

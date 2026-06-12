@@ -235,5 +235,67 @@ class PlanTargetProceedsTest(unittest.TestCase):
         self.assertEqual(result["rows"][0]["quantity"], 15.0)
 
 
+class PlannerOversellTest(unittest.TestCase):
+    def test_multi_sale_combined_oversell_is_rejected(self) -> None:
+        # Each row alone fits within the 20 held units; together they do not.
+        with self.assertRaises(ValueError) as ctx:
+            plan_sale_batch(
+                two_instrument_portfolio(),
+                rates={},
+                sale_date="2025-07-01",
+                rows=[
+                    {"instrumentKey": OLD, "quantity": "15", "pricePerShareCzk": "100"},
+                    {"instrumentKey": OLD, "quantity": "10", "pricePerShareCzk": "100"},
+                ],
+            )
+
+        message = str(ctx.exception)
+        self.assertIn("OLD", message)
+        self.assertIn("25", message)
+        self.assertIn("20", message)
+
+    def test_multi_sale_exact_full_positions_succeed(self) -> None:
+        result = plan_sale_batch(
+            two_instrument_portfolio(),
+            rates={},
+            sale_date="2025-07-01",
+            rows=[
+                {"instrumentKey": OLD, "quantity": "20", "pricePerShareCzk": "100"},
+                {"instrumentKey": NEW, "quantity": "20", "pricePerShareCzk": "100"},
+            ],
+        )
+
+        self.assertEqual(result["estimatedProceedsCzk"], 4000.0)
+
+    def test_multi_sale_before_purchase_is_rejected(self) -> None:
+        with self.assertRaises(ValueError):
+            plan_sale_batch(
+                two_instrument_portfolio(),
+                rates={},
+                sale_date="2022-01-01",
+                rows=[{"instrumentKey": NEW, "quantity": "1", "pricePerShareCzk": "100"}],
+            )
+
+    def test_target_optimizer_never_recommends_more_than_held(self) -> None:
+        # A big future buy must not let the optimizer oversell on the sale date.
+        txs = two_instrument_portfolio() + [
+            trade("buy", "2026-01-01T10:00:00", "100", "500000", "b-future", OLD, "OLD"),
+        ]
+        result = plan_target_proceeds(
+            txs,
+            rates={},
+            sale_date="2025-07-01",
+            target_proceeds_czk="10000000",
+            optimization_mode="min_tax",
+            quotes={OLD: {"pricePerShareCzk": "10000"}, NEW: {"pricePerShareCzk": "10000"}},
+        )
+
+        per_instrument = {row["instrumentKey"]: row["quantity"] for row in result["rows"]}
+        self.assertLessEqual(per_instrument.get(OLD, 0.0), 20.0)
+        self.assertLessEqual(per_instrument.get(NEW, 0.0), 20.0)
+        self.assertEqual(result["estimatedProceedsCzk"], 400000.0)
+        self.assertFalse(result["optimizer"]["targetReached"])
+
+
 if __name__ == "__main__":
     unittest.main()

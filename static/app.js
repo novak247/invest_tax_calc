@@ -15,6 +15,7 @@ const state = {
   quotes: {},
   multiRows: [],
   multiRowSeq: 0,
+  opportunities: null,
 };
 
 const $ = (id) => document.getElementById(id);
@@ -24,6 +25,7 @@ $("asOf").value = today;
 $("planDate").value = today;
 $("multiDate").value = today;
 $("targetDate").value = today;
+$("oppDateA").value = today;
 $("taxYear").value = new Date().getFullYear();
 
 $("pdfFile").addEventListener("change", async (event) => {
@@ -57,6 +59,8 @@ $("multiRefreshBtn").addEventListener("click", () => refreshPrices("multiRefresh
 $("multiPlanBtn").addEventListener("click", runMultiPlan);
 $("targetRefreshBtn").addEventListener("click", () => refreshPrices("targetRefreshBtn"));
 $("targetPlanBtn").addEventListener("click", runTargetPlan);
+$("oppCompareBtn").addEventListener("click", runOppCompare);
+$("oppInstrument").addEventListener("change", syncOppCompareDefaults);
 document.querySelectorAll("[data-plan-tab]").forEach((button) =>
   button.addEventListener("click", () => switchPlanTab(button.dataset.planTab))
 );
@@ -399,6 +403,210 @@ function renderResult(result) {
   renderMatches(result.matches);
   renderWarnings(result.warnings);
   setupPlanner(result.holdings);
+  refreshOpportunities();
+}
+
+async function refreshOpportunities() {
+  try {
+    const result = await postJson("/api/tax-opportunities", payloadBase());
+    state.opportunities = result;
+    renderOpportunities(result);
+  } catch (error) {
+    state.opportunities = null;
+    $("oppSummary").innerHTML = "";
+    $("oppCrossed").classList.add("hidden");
+    $("oppNote").textContent = "";
+    $("oppCompareResult").classList.add("hidden");
+    $("oppMilestones").innerHTML = `<p class="opp-empty">Tax opportunities unavailable: ${escapeHtml(
+      error.message
+    )}</p>`;
+  }
+}
+
+function renderOpportunities(result) {
+  const milestones = result.milestones || [];
+  const nextMilestone = milestones[0];
+  const metrics = [
+    [
+      `Gross proceeds ${result.selectedYear}`,
+      czk(result.existingGrossProceedsCzk),
+      "Counted toward the 100k gross-proceeds rule",
+      false,
+    ],
+    [
+      "Remaining under 100k",
+      czk(result.remainingGrossAllowanceCzk),
+      result.grossLimitCrossed
+        ? "Limit already crossed"
+        : "Gross proceeds you can still add this year",
+      result.grossLimitCrossed,
+    ],
+    [
+      "Next tax-free date",
+      nextMilestone ? nextMilestone.taxFreeDate : "—",
+      nextMilestone
+        ? `${nextMilestone.ticker || nextMilestone.instrumentKey}: +${qty(nextMilestone.quantity)} units`
+        : "No lots are waiting on the time test",
+      false,
+    ],
+  ];
+  $("oppSummary").innerHTML = metrics
+    .map(
+      ([label, value, note, danger]) => `
+        <article class="metric">
+          <span>${escapeHtml(label)}</span>
+          <strong${danger ? ' class="crossed"' : ""}>${escapeHtml(value)}</strong>
+          <small>${escapeHtml(note)}</small>
+        </article>
+      `
+    )
+    .join("");
+
+  const crossed = $("oppCrossed");
+  if (result.grossLimitCrossed) {
+    crossed.textContent = `100,000 CZK gross-proceeds limit crossed for ${result.selectedYear} — short-term sales this year are taxable unless time-exempt.`;
+    crossed.classList.remove("hidden");
+  } else {
+    crossed.classList.add("hidden");
+  }
+  $("oppNote").textContent = `// ${result.grossLimitWarning || ""}`;
+
+  if (!milestones.length) {
+    $("oppMilestones").innerHTML = `<p class="opp-empty">${
+      result.holdingsCount
+        ? "No upcoming tax-free milestones — every open lot already passes the 3-year time test."
+        : "No open holdings — nothing is waiting on the 3-year time test."
+    }</p>`;
+  } else {
+    $("oppMilestones").innerHTML = `
+      <table>
+        <thead><tr><th>Tax-free date</th><th>Instrument</th><th>Qty becoming exempt</th><th>Cumulative tax-free</th><th>Cost basis CZK</th></tr></thead>
+        <tbody>
+          ${milestones
+            .map(
+              (item) => `
+                <tr>
+                  <td>${escapeHtml(item.taxFreeDate)}</td>
+                  <td>${instrumentLabel(item)}</td>
+                  <td class="num">${qty(item.quantity)}</td>
+                  <td class="num">${qty(item.cumulativeTaxFreeQuantity)}</td>
+                  <td class="num">${czk(item.costCzk)}</td>
+                </tr>
+              `
+            )
+            .join("")}
+        </tbody>
+      </table>
+    `;
+  }
+
+  $("oppCompareResult").classList.add("hidden");
+  setupOppCompare();
+}
+
+function setupOppCompare() {
+  const select = $("oppInstrument");
+  const previous = select.value;
+  select.innerHTML = state.holdings
+    .map(
+      (holding) =>
+        `<option value="${escapeHtml(holding.instrumentKey)}">${instrumentLabel(holding, false)}</option>`
+    )
+    .join("");
+  if (previous && state.holdings.some((holding) => holding.instrumentKey === previous)) {
+    select.value = previous;
+  }
+  if (!$("oppDateA").value) $("oppDateA").value = today;
+  syncOppCompareDefaults();
+}
+
+function syncOppCompareDefaults() {
+  const holding = state.holdings.find(
+    (item) => item.instrumentKey === $("oppInstrument").value
+  );
+  if (!holding) return;
+  if (!$("oppQuantity").value) $("oppQuantity").value = holding.quantity;
+  $("oppDateB").value = holding.nextTaxFreeDate || "";
+}
+
+async function runOppCompare() {
+  if (!state.result) {
+    showError("Analyze a report before comparing sale dates.");
+    return;
+  }
+
+  setBusy("oppCompareBtn", true);
+  clearError();
+  try {
+    const result = await postJson("/api/tax-opportunities/compare", {
+      ...payloadBase(),
+      instrumentKey: $("oppInstrument").value,
+      quantity: $("oppQuantity").value,
+      pricePerShareCzk: $("oppPrice").value,
+      firstDate: $("oppDateA").value,
+      secondDate: $("oppDateB").value,
+    });
+    renderOppCompare(result);
+  } catch (error) {
+    showError(error.message);
+  } finally {
+    setBusy("oppCompareBtn", false);
+  }
+}
+
+function renderOppCompare(result) {
+  const box = $("oppCompareResult");
+  const first = result.first || {};
+  const second = result.second || {};
+  const diff = result.comparison || {};
+  const rows = [
+    ["Est. proceeds", first.estimatedProceedsCzk, second.estimatedProceedsCzk, null],
+    ["Exempt proceeds", first.exemptProceedsCzk, second.exemptProceedsCzk, diff.exemptProceedsDifferenceCzk],
+    ["Taxable proceeds", first.taxableProceedsCzk, second.taxableProceedsCzk, diff.taxableProceedsDifferenceCzk],
+    ["Taxable gain delta", first.taxableGainDeltaCzk, second.taxableGainDeltaCzk, diff.taxableGainDifferenceCzk],
+    ["Est. tax at 15%", first.estimatedTaxDelta15Czk, second.estimatedTaxDelta15Czk, diff.estimatedTaxDifference15Czk],
+    ["Gross proceeds after sale", first.grossProceedsAfterCzk, second.grossProceedsAfterCzk, diff.grossProceedsAfterDifferenceCzk],
+  ];
+
+  const taxSaving = -Number(diff.estimatedTaxDifference15Czk || 0);
+  let note = "No estimated tax difference between the two dates.";
+  if (taxSaving > 0) {
+    note = `Waiting until ${second.saleDate} saves about ${czk(taxSaving)} in estimated tax.`;
+  } else if (taxSaving < 0) {
+    note = `Selling on ${first.saleDate} is cheaper by about ${czk(-taxSaving)} in estimated tax.`;
+  }
+
+  const warnings = [...new Set([...(first.warnings || []), ...(second.warnings || [])])];
+  const warningsNote = warnings.length
+    ? `<p class="plan-summary-note" style="color: var(--amber); padding: 0 14px 14px;">${warnings
+        .map((warning) => escapeHtml(warning))
+        .join("<br>")}</p>`
+    : "";
+
+  box.innerHTML = `
+    <table class="opp-compare-table">
+      <thead><tr><th></th><th>A · ${escapeHtml(first.saleDate || "")}</th><th>B · ${escapeHtml(
+    second.saleDate || ""
+  )}</th><th>B − A</th></tr></thead>
+      <tbody>
+        ${rows
+          .map(
+            ([label, a, b, d]) => `
+              <tr>
+                <td>${escapeHtml(label)}</td>
+                <td class="num">${czk(a)}</td>
+                <td class="num">${czk(b)}</td>
+                <td class="num">${d == null ? "—" : czk(d)}</td>
+              </tr>
+            `
+          )
+          .join("")}
+      </tbody>
+    </table>
+    <p class="opp-compare-note ${taxSaving > 0 ? "save" : ""}">${escapeHtml(note)}</p>
+    ${warningsNote}
+  `;
+  box.classList.remove("hidden");
 }
 
 function renderSummary(summary) {
@@ -956,6 +1164,12 @@ function renderPlan(result) {
     `
     : "";
 
+  const planWarnings = (result.warnings || []).length
+    ? `<p class="plan-summary-note" style="color: var(--amber)">${result.warnings
+        .map((warning) => escapeHtml(warning))
+        .join("<br>")}</p>`
+    : "";
+
   box.innerHTML = `
     <div class="plan-result-grid">
       <div><span>Planned proceeds</span><strong>${czk(result.plannedProceedsCzk)}</strong></div>
@@ -964,6 +1178,7 @@ function renderPlan(result) {
       <div><span>After-sale gross proceeds</span><strong>${czk(result.afterSummary.grossProceedsCzk)}</strong></div>
     </div>
     ${plannedGroups}
+    ${planWarnings}
   `;
   box.classList.remove("hidden");
   return;

@@ -34,6 +34,7 @@ from invest_tax_calc.email_import.providers import Attachment, GmailClient
 from invest_tax_calc.email_import.scopes import GMAIL_READONLY_SCOPE
 from invest_tax_calc.email_import.storage import AttachmentStore, ImportLedger
 from invest_tax_calc.models import Money, Trade
+from invest_tax_calc.opportunities import compare_sale_dates, tax_opportunities
 from invest_tax_calc.planner import plan_sale_batch, plan_target_proceeds
 from invest_tax_calc.prices import (
     InstrumentRef,
@@ -474,6 +475,18 @@ class Handler(BaseHTTPRequestHandler):
                 self._send_json(result)
                 return
 
+            if self.path == "/api/tax-opportunities":
+                payload = self._read_json()
+                result = self._handle_tax_opportunities(payload)
+                self._send_json(result)
+                return
+
+            if self.path == "/api/tax-opportunities/compare":
+                payload = self._read_json()
+                result = self._handle_tax_compare(payload)
+                self._send_json(result)
+                return
+
             if self.path == "/api/prices/quote":
                 payload = self._read_json()
                 result = handle_price_quote(payload)
@@ -594,6 +607,39 @@ class Handler(BaseHTTPRequestHandler):
                 optimization_mode=str(payload.get("optimizationMode") or "min_tax"),
                 candidate_instrument_keys=candidate_keys,
                 quotes=quotes,
+            )
+        except ValueError as exc:
+            raise AppError(str(exc)) from exc
+
+    def _handle_tax_opportunities(self, payload: dict[str, Any]) -> dict[str, Any]:
+        rates = parse_rate_table(str(payload.get("rates") or ""))
+        tax_year = int(payload.get("taxYear") or 0) or None
+        as_of = str(payload.get("asOf") or "")
+        transactions = self._parse_report_transactions(payload)
+
+        try:
+            return tax_opportunities(
+                transactions,
+                rates=rates,
+                tax_year=tax_year,
+                as_of=as_of or None,
+            )
+        except ValueError as exc:
+            raise AppError(str(exc)) from exc
+
+    def _handle_tax_compare(self, payload: dict[str, Any]) -> dict[str, Any]:
+        rates = parse_rate_table(str(payload.get("rates") or ""))
+        transactions = self._parse_report_transactions(payload)
+
+        try:
+            return compare_sale_dates(
+                transactions,
+                rates=rates,
+                instrument_key=str(payload.get("instrumentKey") or ""),
+                quantity=str(payload.get("quantity") or ""),
+                price_per_share_czk=str(payload.get("pricePerShareCzk") or ""),
+                first_date=str(payload.get("firstDate") or ""),
+                second_date=str(payload.get("secondDate") or ""),
             )
         except ValueError as exc:
             raise AppError(str(exc)) from exc
