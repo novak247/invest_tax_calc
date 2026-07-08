@@ -166,6 +166,10 @@
       .opp-empty { padding: 14px; color: var(--dim); font-size: 12px; }
       .opp-subhead { padding: 12px 14px 2px; color: var(--amber); font-size: 10px; letter-spacing: 0.18em; text-transform: uppercase; }
       .opp-subhead::before { content: "▌ "; }
+      .milestone-summary-table th, .milestone-summary-table td { padding-top: 9px; padding-bottom: 9px; }
+      .milestone-details { border-top: 1px solid var(--grid); margin-top: 6px; }
+      .milestone-details summary { cursor: pointer; padding: 11px 14px; color: var(--cyan); font-size: 10px; letter-spacing: 0.14em; text-transform: uppercase; user-select: none; }
+      .milestone-details[open] summary { border-bottom: 1px solid var(--grid); }
       .opp-compare { border-top: 1px solid var(--grid); }
       .opp-compare-table td:first-child { color: var(--dim); text-transform: uppercase; font-size: 10px; letter-spacing: 0.08em; }
       .opp-compare-note { padding: 0 14px 14px; font-size: 11.5px; color: var(--cyan); }
@@ -254,6 +258,7 @@
             <label>TAX_YR<input id="taxYear" type="number" min="2000" max="2100" /></label>
             <label>AS_OF<input id="asOf" type="date" /></label>
           </div>
+          <label>OTHER_SALES_CZK<input id="otherAnnualProceeds" type="number" min="0" step="0.01" placeholder="0" /></label>
           <label>FX_CZK<textarea id="rates" spellcheck="false">USD=23.20
 EUR=25.10
 GBP=29.40</textarea></label>
@@ -346,7 +351,7 @@ GBP=29.40</textarea></label>
               <div id="oppSummary" class="opp-summary"></div>
               <div id="oppCrossed" class="opp-crossed hidden"></div>
               <p id="oppNote" class="opp-note"></p>
-              <div class="opp-subhead">Upcoming tax-free milestones</div>
+              <div class="opp-subhead">Next tax-free milestones by instrument</div>
               <div id="oppMilestones"></div>
               <div class="opp-compare">
                 <div class="opp-subhead">Sell now vs wait</div>

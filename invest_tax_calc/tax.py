@@ -45,11 +45,16 @@ def analyze_transactions(
     rates: dict[str, Decimal],
     tax_year: int | None = None,
     as_of: str | date | None = None,
+    other_annual_proceeds_czk: Decimal | str = Decimal("0"),
 ) -> dict[str, Any]:
     if not transactions:
         return {}
 
     as_of_date = _parse_date(as_of) if as_of else date.today()
+    other_proceeds = _parse_non_negative_decimal(
+        other_annual_proceeds_czk,
+        "other annual securities proceeds",
+    )
     # Transactions after the analysis date do not exist yet from its point of
     # view: they must not shape holdings, lot matching, summaries or warnings.
     transactions = _transactions_on_or_before(transactions, as_of_date)
@@ -57,10 +62,13 @@ def analyze_transactions(
     years = sorted({match["sale_date"].year for match in matches})
     selected_year = tax_year or (years[-1] if years else as_of_date.year)
 
-    summaries = {
-        year: _summarize_year(matches, year)
-        for year in sorted(set(years) | {selected_year})
-    }
+    summaries = {}
+    for year in sorted(set(years) | {selected_year}):
+        summaries[year] = _summarize_year(
+            matches,
+            year,
+            other_annual_proceeds_czk=other_proceeds if year == selected_year else Decimal("0"),
+        )
     selected_summary = summaries[selected_year]
     holdings_payload = _holdings_payload(holdings, as_of_date)
 
@@ -91,6 +99,7 @@ def plan_sale(
     quantity: str,
     price_per_share_czk: str,
     sale_date: str,
+    other_annual_proceeds_czk: Decimal | str = Decimal("0"),
 ) -> dict[str, Any]:
     if not instrument_key:
         raise ValueError("Choose an instrument to plan.")
@@ -109,6 +118,7 @@ def plan_sale(
         rates=rates,
         tax_year=planned_date.year,
         as_of=planned_date,
+        other_annual_proceeds_czk=other_annual_proceeds_czk,
     )
 
     holdings = baseline.get("holdings", [])
@@ -134,6 +144,7 @@ def plan_sale(
         rates=rates,
         tax_year=planned_date.year,
         as_of=planned_date,
+        other_annual_proceeds_czk=other_annual_proceeds_czk,
     )
     planned_matches = [
         match
@@ -332,9 +343,15 @@ def _match_lots(
     return matches, lots, warnings
 
 
-def _summarize_year(matches: list[dict[str, Any]], year: int) -> dict[str, Any]:
+def _summarize_year(
+    matches: list[dict[str, Any]],
+    year: int,
+    *,
+    other_annual_proceeds_czk: Decimal = Decimal("0"),
+) -> dict[str, Any]:
     yearly = [match for match in matches if match["sale_date"].year == year]
-    gross = sum((match["gross_proceeds_czk"] for match in yearly), Decimal("0"))
+    loaded_gross = sum((match["gross_proceeds_czk"] for match in yearly), Decimal("0"))
+    gross = loaded_gross + other_annual_proceeds_czk
     gross_limit_applies = gross <= GROSS_PROCEEDS_EXEMPTION_CZK
 
     taxable_proceeds = Decimal("0")
@@ -362,6 +379,8 @@ def _summarize_year(matches: list[dict[str, Any]], year: int) -> dict[str, Any]:
     return {
         "year": year,
         "grossProceedsCzk": _num(gross),
+        "loadedGrossProceedsCzk": _num(loaded_gross),
+        "otherAnnualProceedsCzk": _num(other_annual_proceeds_czk),
         "grossLimitCzk": _num(GROSS_PROCEEDS_EXEMPTION_CZK),
         "grossLimitApplies": gross_limit_applies,
         "taxableProceedsCzk": _num(taxable_proceeds),
@@ -533,6 +552,21 @@ def _parse_decimal(value: str, label: str) -> Decimal:
         return Decimal(cleaned)
     except InvalidOperation as exc:
         raise ValueError(f"Invalid {label}: {value}") from exc
+
+
+def _parse_non_negative_decimal(value: Decimal | str, label: str) -> Decimal:
+    if isinstance(value, Decimal):
+        parsed = value
+    else:
+        raw = str(value or "").strip()
+        if not raw:
+            return Decimal("0")
+        parsed = _parse_decimal(raw, label)
+    if not parsed.is_finite():
+        raise ValueError(f"{label.capitalize()} must be finite.")
+    if parsed < 0:
+        raise ValueError(f"{label.capitalize()} cannot be negative.")
+    return parsed
 
 
 def _parse_date(value: str | date | None) -> date:

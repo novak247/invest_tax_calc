@@ -54,6 +54,25 @@ class TaxEngineTest(unittest.TestCase):
         self.assertEqual(result["summary"]["taxableGainCzk"], 40000.0)
         self.assertEqual(result["summary"]["estimatedTax15Czk"], 6000.0)
 
+    def test_other_annual_proceeds_count_toward_gross_limit(self) -> None:
+        result = analyze_transactions(
+            [
+                trade("buy", "2025-01-01T10:00:00", "10", "40000", "b1"),
+                trade("sell", "2025-06-01T10:00:00", "10", "60000", "s1"),
+            ],
+            rates={},
+            tax_year=2025,
+            as_of="2025-12-31",
+            other_annual_proceeds_czk=Decimal("50000"),
+        )
+
+        summary = result["summary"]
+        self.assertEqual(summary["loadedGrossProceedsCzk"], 60000.0)
+        self.assertEqual(summary["otherAnnualProceedsCzk"], 50000.0)
+        self.assertEqual(summary["grossProceedsCzk"], 110000.0)
+        self.assertFalse(summary["grossLimitApplies"])
+        self.assertEqual(summary["taxableGainCzk"], 20000.0)
+
     def test_time_test_exempts_lot_after_three_years(self) -> None:
         result = analyze_transactions(
             [

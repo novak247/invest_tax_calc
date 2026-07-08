@@ -34,7 +34,11 @@ from invest_tax_calc.email_import.providers import Attachment, GmailClient
 from invest_tax_calc.email_import.scopes import GMAIL_READONLY_SCOPE
 from invest_tax_calc.email_import.storage import AttachmentStore, ImportLedger
 from invest_tax_calc.models import Money, Trade
-from invest_tax_calc.opportunities import compare_sale_dates, tax_opportunities
+from invest_tax_calc.opportunities import (
+    compare_sale_dates,
+    tax_opportunities,
+    tax_opportunities_from_analysis,
+)
 from invest_tax_calc.planner import plan_sale_batch, plan_target_proceeds
 from invest_tax_calc.prices import (
     InstrumentRef,
@@ -539,21 +543,26 @@ class Handler(BaseHTTPRequestHandler):
         rates = parse_rate_table(str(payload.get("rates") or ""))
         tax_year = int(payload.get("taxYear") or 0) or None
         as_of = str(payload.get("asOf") or "")
+        other_proceeds = _other_annual_proceeds(payload)
 
         transactions = self._parse_report_transactions(payload)
         if not transactions:
             raise AppError("No Trading 212 buy or sell orders were found in this report.")
 
-        return analyze_transactions(
+        result = analyze_transactions(
             transactions,
             rates=rates,
             tax_year=tax_year,
             as_of=as_of or None,
+            other_annual_proceeds_czk=other_proceeds,
         )
+        result["taxOpportunities"] = tax_opportunities_from_analysis(result)
+        return result
 
     def _handle_plan(self, payload: dict[str, Any]) -> dict[str, Any]:
         rates = parse_rate_table(str(payload.get("rates") or ""))
         transactions = self._parse_report_transactions(payload)
+        other_proceeds = _other_annual_proceeds(payload)
 
         try:
             return plan_sale(
@@ -563,6 +572,7 @@ class Handler(BaseHTTPRequestHandler):
                 quantity=str(payload.get("quantity") or ""),
                 price_per_share_czk=str(payload.get("pricePerShareCzk") or ""),
                 sale_date=str(payload.get("saleDate") or ""),
+                other_annual_proceeds_czk=other_proceeds,
             )
         except ValueError as exc:
             raise AppError(str(exc)) from exc
@@ -570,6 +580,7 @@ class Handler(BaseHTTPRequestHandler):
     def _handle_plan_batch(self, payload: dict[str, Any]) -> dict[str, Any]:
         rates = parse_rate_table(str(payload.get("rates") or ""))
         transactions = self._parse_report_transactions(payload)
+        other_proceeds = _other_annual_proceeds(payload)
         rows = payload.get("rows")
         if not isinstance(rows, list) or not rows:
             raise AppError("Add at least one sale row to plan.")
@@ -580,6 +591,7 @@ class Handler(BaseHTTPRequestHandler):
                 rates=rates,
                 sale_date=str(payload.get("saleDate") or ""),
                 rows=[row for row in rows if isinstance(row, dict)],
+                other_annual_proceeds_czk=other_proceeds,
             )
         except ValueError as exc:
             raise AppError(str(exc)) from exc
@@ -587,6 +599,7 @@ class Handler(BaseHTTPRequestHandler):
     def _handle_plan_target(self, payload: dict[str, Any]) -> dict[str, Any]:
         rates = parse_rate_table(str(payload.get("rates") or ""))
         transactions = self._parse_report_transactions(payload)
+        other_proceeds = _other_annual_proceeds(payload)
 
         raw_keys = payload.get("candidateInstrumentKeys")
         candidate_keys = (
@@ -607,6 +620,7 @@ class Handler(BaseHTTPRequestHandler):
                 optimization_mode=str(payload.get("optimizationMode") or "min_tax"),
                 candidate_instrument_keys=candidate_keys,
                 quotes=quotes,
+                other_annual_proceeds_czk=other_proceeds,
             )
         except ValueError as exc:
             raise AppError(str(exc)) from exc
@@ -615,6 +629,7 @@ class Handler(BaseHTTPRequestHandler):
         rates = parse_rate_table(str(payload.get("rates") or ""))
         tax_year = int(payload.get("taxYear") or 0) or None
         as_of = str(payload.get("asOf") or "")
+        other_proceeds = _other_annual_proceeds(payload)
         transactions = self._parse_report_transactions(payload)
 
         try:
@@ -623,6 +638,7 @@ class Handler(BaseHTTPRequestHandler):
                 rates=rates,
                 tax_year=tax_year,
                 as_of=as_of or None,
+                other_annual_proceeds_czk=other_proceeds,
             )
         except ValueError as exc:
             raise AppError(str(exc)) from exc
@@ -630,6 +646,7 @@ class Handler(BaseHTTPRequestHandler):
     def _handle_tax_compare(self, payload: dict[str, Any]) -> dict[str, Any]:
         rates = parse_rate_table(str(payload.get("rates") or ""))
         transactions = self._parse_report_transactions(payload)
+        other_proceeds = _other_annual_proceeds(payload)
 
         try:
             return compare_sale_dates(
@@ -640,6 +657,7 @@ class Handler(BaseHTTPRequestHandler):
                 price_per_share_czk=str(payload.get("pricePerShareCzk") or ""),
                 first_date=str(payload.get("firstDate") or ""),
                 second_date=str(payload.get("secondDate") or ""),
+                other_annual_proceeds_czk=other_proceeds,
             )
         except ValueError as exc:
             raise AppError(str(exc)) from exc
@@ -1017,6 +1035,21 @@ def handle_fx_rates(
         "rates": {currency: str(rate) for currency, rate in rates.items()},
         "warnings": warnings,
     }
+
+
+def _other_annual_proceeds(payload: dict[str, Any]) -> Decimal:
+    raw = str(payload.get("otherAnnualProceedsCzk") or "").strip()
+    if not raw:
+        return Decimal("0")
+    try:
+        value = Decimal(raw.replace(",", "."))
+    except Exception as exc:
+        raise AppError("Other annual securities proceeds must be a CZK number.") from exc
+    if not value.is_finite():
+        raise AppError("Other annual securities proceeds must be a finite CZK number.")
+    if value < 0:
+        raise AppError("Other annual securities proceeds cannot be negative.")
+    return value
 
 
 def _get_gmail_session(state: str) -> GmailImportSession:

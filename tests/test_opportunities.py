@@ -52,6 +52,24 @@ class TaxOpportunitiesTest(unittest.TestCase):
         self.assertFalse(result["grossLimitCrossed"])
         self.assertIn("100,000", result["grossLimitWarning"])
 
+    def test_other_annual_proceeds_reduce_remaining_allowance(self) -> None:
+        result = tax_opportunities(
+            [
+                trade("buy", "2025-01-01T10:00:00", "10", "50000", "b1"),
+                trade("sell", "2025-06-01T10:00:00", "5", "40000", "s1"),
+            ],
+            rates={},
+            tax_year=2025,
+            as_of="2025-12-31",
+            other_annual_proceeds_czk=Decimal("30000"),
+        )
+
+        self.assertEqual(result["loadedGrossProceedsCzk"], 40000.0)
+        self.assertEqual(result["otherAnnualProceedsCzk"], 30000.0)
+        self.assertEqual(result["existingGrossProceedsCzk"], 70000.0)
+        self.assertEqual(result["remainingGrossAllowanceCzk"], 30000.0)
+        self.assertFalse(result["grossLimitCrossed"])
+
     def test_zero_allowance_after_crossing_threshold(self) -> None:
         result = tax_opportunities(
             [

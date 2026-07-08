@@ -367,6 +367,7 @@ function payloadBase() {
     reparseCachedPdfs: $("gmailReparseCachedPdfs").checked,
     taxYear: Number($("taxYear").value),
     asOf: $("asOf").value,
+    otherAnnualProceedsCzk: $("otherAnnualProceeds").value,
     rates: $("rates").value,
   };
 }
@@ -403,7 +404,12 @@ function renderResult(result) {
   renderMatches(result.matches);
   renderWarnings(result.warnings);
   setupPlanner(result.holdings);
-  refreshOpportunities();
+  if (result.taxOpportunities) {
+    state.opportunities = result.taxOpportunities;
+    renderOpportunities(result.taxOpportunities);
+  } else {
+    refreshOpportunities();
+  }
 }
 
 async function refreshOpportunities() {
@@ -426,11 +432,14 @@ async function refreshOpportunities() {
 function renderOpportunities(result) {
   const milestones = result.milestones || [];
   const nextMilestone = milestones[0];
+  const otherProceeds = Number(result.otherAnnualProceedsCzk || 0);
   const metrics = [
     [
-      `Gross proceeds ${result.selectedYear}`,
+      `Taxpayer gross ${result.selectedYear}`,
       czk(result.existingGrossProceedsCzk),
-      "Counted toward the 100k gross-proceeds rule",
+      otherProceeds > 0
+        ? `${czk(result.loadedGrossProceedsCzk)} loaded + ${czk(otherProceeds)} other`
+        : "Counted toward the 100k gross-proceeds rule",
       false,
     ],
     [
@@ -478,11 +487,99 @@ function renderOpportunities(result) {
         : "No open holdings — nothing is waiting on the 3-year time test."
     }</p>`;
   } else {
+    const milestoneGroups = groupMilestonesByInstrument(milestones);
     $("oppMilestones").innerHTML = `
+      ${renderMilestoneSummary(milestoneGroups)}
+      ${renderMilestoneDetails(milestones)}
+    `;
+  }
+
+  $("oppCompareResult").classList.add("hidden");
+  setupOppCompare();
+}
+
+function groupMilestonesByInstrument(milestones) {
+  const groups = new Map();
+  for (const item of milestones) {
+    const key = item.instrumentKey || `${item.ticker || ""}:${item.isin || ""}`;
+    if (!groups.has(key)) {
+      groups.set(key, {
+        instrumentKey: item.instrumentKey,
+        ticker: item.ticker,
+        isin: item.isin,
+        name: item.name,
+        firstDate: item.taxFreeDate,
+        firstQuantity: 0,
+        firstCumulativeTaxFreeQuantity: 0,
+        lastDate: item.taxFreeDate,
+        milestoneCount: 0,
+        totalQuantity: 0,
+        totalCostCzk: 0,
+      });
+    }
+    const group = groups.get(key);
+    const itemQuantity = Number(item.quantity || 0);
+    const itemCost = Number(item.costCzk || 0);
+    if (item.taxFreeDate === group.firstDate) {
+      group.firstQuantity += itemQuantity;
+      group.firstCumulativeTaxFreeQuantity = Math.max(
+        group.firstCumulativeTaxFreeQuantity,
+        Number(item.cumulativeTaxFreeQuantity || 0)
+      );
+    }
+    group.lastDate = item.taxFreeDate;
+    group.milestoneCount += 1;
+    group.totalQuantity += itemQuantity;
+    group.totalCostCzk += itemCost;
+  }
+  return [...groups.values()].sort((a, b) =>
+    a.firstDate === b.firstDate
+      ? instrumentLabel(a, false).localeCompare(instrumentLabel(b, false))
+      : a.firstDate.localeCompare(b.firstDate)
+  );
+}
+
+function renderMilestoneSummary(groups) {
+  return `
+    <table class="milestone-summary-table">
+      <thead><tr><th>Instrument</th><th>Next tax-free date</th><th>Qty on next date</th><th>Remaining milestones</th><th>Total pending qty</th><th>Cost basis CZK</th></tr></thead>
+      <tbody>
+        ${groups
+          .map(
+            (group) => `
+              <tr>
+                <td>${instrumentLabel(group)}</td>
+                <td>${escapeHtml(group.firstDate)}</td>
+                <td class="num">${qty(group.firstQuantity)}</td>
+                <td>${escapeHtml(milestoneRangeLabel(group))}</td>
+                <td class="num">${qty(group.totalQuantity)}</td>
+                <td class="num">${czk(group.totalCostCzk)}</td>
+              </tr>
+            `
+          )
+          .join("")}
+      </tbody>
+    </table>
+  `;
+}
+
+function milestoneRangeLabel(group) {
+  if (group.milestoneCount === 1) {
+    return "1 date";
+  }
+  return `${group.milestoneCount} dates through ${group.lastDate}`;
+}
+
+function renderMilestoneDetails(milestones) {
+  const visibleRows = milestones.slice(0, 250);
+  const hiddenCount = milestones.length - visibleRows.length;
+  return `
+    <details class="milestone-details">
+      <summary>Show exact milestone rows (${milestones.length})</summary>
       <table>
         <thead><tr><th>Tax-free date</th><th>Instrument</th><th>Qty becoming exempt</th><th>Cumulative tax-free</th><th>Cost basis CZK</th></tr></thead>
         <tbody>
-          ${milestones
+          ${visibleRows
             .map(
               (item) => `
                 <tr>
@@ -497,11 +594,13 @@ function renderOpportunities(result) {
             .join("")}
         </tbody>
       </table>
-    `;
-  }
-
-  $("oppCompareResult").classList.add("hidden");
-  setupOppCompare();
+      ${
+        hiddenCount > 0
+          ? `<p class="opp-empty">Showing first ${visibleRows.length} rows. ${hiddenCount} later rows hidden to keep the UI responsive.</p>`
+          : ""
+      }
+    </details>
+  `;
 }
 
 function setupOppCompare() {
@@ -610,8 +709,15 @@ function renderOppCompare(result) {
 }
 
 function renderSummary(summary) {
+  const otherProceeds = Number(summary.otherAnnualProceedsCzk || 0);
   const metrics = [
-    ["Gross proceeds", czk(summary.grossProceedsCzk), `Year ${summary.year}`],
+    [
+      "Gross proceeds",
+      czk(summary.grossProceedsCzk),
+      otherProceeds > 0
+        ? `${czk(summary.loadedGrossProceedsCzk)} loaded + ${czk(otherProceeds)} other`
+        : `Year ${summary.year}`,
+    ],
     [
       "Exempt proceeds",
       czk(summary.exemptProceedsCzk),

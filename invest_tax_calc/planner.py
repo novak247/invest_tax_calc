@@ -33,6 +33,7 @@ def plan_sale_batch(
     rates: dict[str, Decimal],
     sale_date: str,
     rows: list[dict[str, Any]],
+    other_annual_proceeds_czk: Decimal | str = Decimal("0"),
 ) -> dict[str, Any]:
     """Evaluate several planned sells as one scenario.
 
@@ -50,6 +51,7 @@ def plan_sale_batch(
         rates=rates,
         tax_year=planned_date.year,
         as_of=planned_date,
+        other_annual_proceeds_czk=other_annual_proceeds_czk,
     )
     holdings = baseline.get("holdings", [])
 
@@ -105,6 +107,7 @@ def plan_sale_batch(
         rates=rates,
         tax_year=planned_date.year,
         as_of=planned_date,
+        other_annual_proceeds_czk=other_annual_proceeds_czk,
     )
     planned_matches = _planned_matches(after)
     matches_by_source: dict[str, list[dict[str, Any]]] = {}
@@ -152,6 +155,7 @@ def plan_target_proceeds(
     optimization_mode: str = "min_tax",
     candidate_instrument_keys: list[str] | None = None,
     quotes: dict[str, Any] | None = None,
+    other_annual_proceeds_czk: Decimal | str = Decimal("0"),
 ) -> dict[str, Any]:
     """Pick what to sell to raise a fixed CZK amount with the least tax impact.
 
@@ -179,6 +183,7 @@ def plan_target_proceeds(
         rates=rates,
         tax_year=planned_date.year,
         as_of=planned_date,
+        other_annual_proceeds_czk=other_annual_proceeds_czk,
     )
     holdings = baseline.get("holdings", [])
 
@@ -212,6 +217,7 @@ def plan_target_proceeds(
             prices=prices,
             planned_date=planned_date,
             rates=rates,
+            other_annual_proceeds_czk=other_annual_proceeds_czk,
         )
         score = (
             Decimal(str(scenario["estimatedTaxDelta15Czk"])),
@@ -426,6 +432,7 @@ def _evaluate_scenario(
     prices: dict[str, Decimal],
     planned_date: date,
     rates: dict[str, Decimal],
+    other_annual_proceeds_czk: Decimal | str = Decimal("0"),
 ) -> dict[str, Any]:
     rows = [
         {"instrumentKey": key, "quantity": qty}
@@ -465,6 +472,7 @@ def _evaluate_scenario(
         rates=rates,
         tax_year=planned_date.year,
         as_of=planned_date,
+        other_annual_proceeds_czk=other_annual_proceeds_czk,
     )
     planned_matches = _planned_matches(after)
     matches_by_source: dict[str, list[dict[str, Any]]] = {}

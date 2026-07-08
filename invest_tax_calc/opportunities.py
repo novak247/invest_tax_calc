@@ -28,6 +28,7 @@ def tax_opportunities(
     rates: dict[str, Decimal],
     tax_year: int | None = None,
     as_of: str | date | None = None,
+    other_annual_proceeds_czk: Decimal | str = Decimal("0"),
 ) -> dict[str, Any]:
     """Summarize the remaining gross-proceeds allowance and upcoming
     tax-free (3-year time test) milestones for the open holdings."""
@@ -35,12 +36,25 @@ def tax_opportunities(
         raise ValueError("Load and analyze statements before reviewing tax opportunities.")
 
     analysis = analyze_transactions(
-        transactions, rates=rates, tax_year=tax_year, as_of=as_of
+        transactions,
+        rates=rates,
+        tax_year=tax_year,
+        as_of=as_of,
+        other_annual_proceeds_czk=other_annual_proceeds_czk,
     )
+    return tax_opportunities_from_analysis(analysis)
+
+
+def tax_opportunities_from_analysis(analysis: dict[str, Any]) -> dict[str, Any]:
+    if not analysis:
+        raise ValueError("Load and analyze statements before reviewing tax opportunities.")
+
     summary = analysis["summary"]
     as_of_date = _parse_date(analysis["asOf"])
 
     gross = Decimal(str(summary["grossProceedsCzk"]))
+    loaded_gross = Decimal(str(summary.get("loadedGrossProceedsCzk", gross)))
+    other_gross = Decimal(str(summary.get("otherAnnualProceedsCzk", "0")))
     remaining = max(GROSS_PROCEEDS_EXEMPTION_CZK - gross, Decimal("0"))
     holdings = analysis.get("holdings", [])
 
@@ -49,6 +63,8 @@ def tax_opportunities(
         "asOf": analysis["asOf"],
         "grossLimitCzk": _num(GROSS_PROCEEDS_EXEMPTION_CZK),
         "existingGrossProceedsCzk": _num(gross),
+        "loadedGrossProceedsCzk": _num(loaded_gross),
+        "otherAnnualProceedsCzk": _num(other_gross),
         "remainingGrossAllowanceCzk": _num(remaining),
         "grossLimitCrossed": gross > GROSS_PROCEEDS_EXEMPTION_CZK,
         "grossLimitWarning": GROSS_LIMIT_WARNING,
@@ -66,6 +82,7 @@ def compare_sale_dates(
     price_per_share_czk: str,
     first_date: str = "",
     second_date: str = "",
+    other_annual_proceeds_czk: Decimal | str = Decimal("0"),
 ) -> dict[str, Any]:
     """Run the same planned sale on two dates and report the difference.
 
@@ -93,6 +110,7 @@ def compare_sale_dates(
                 quantity=quantity,
                 price_per_share_czk=price_per_share_czk,
                 sale_date=when.isoformat(),
+                other_annual_proceeds_czk=other_annual_proceeds_czk,
             )
         )
         for when in (first, second)
